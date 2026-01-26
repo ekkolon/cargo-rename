@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::ops::{
-    update_dependent_manifest, update_package_name, update_source_code, update_workspace_members,
-    Transaction,
+    Transaction, update_dependent_manifest, update_package_name, update_source_code,
+    update_workspace_members,
 };
 use crate::validation::{confirm_operation, preflight_checks};
 use cargo_metadata::MetadataCommand;

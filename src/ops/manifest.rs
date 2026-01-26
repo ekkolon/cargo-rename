@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::ops::transaction::Transaction;
 use std::fs;
 use std::path::Path;
-use toml_edit::{value, DocumentMut, Item, Value};
+use toml_edit::{DocumentMut, Item, Value, value};
 
 pub fn update_dependent_manifest(
     manifest_path: &Path,
