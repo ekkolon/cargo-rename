@@ -19,8 +19,8 @@ pub fn update_dependent_manifest(
     let manifest_dir = manifest_path.parent().unwrap();
 
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(deps_item) = doc.get_mut(section) {
-            if let Some(deps) = deps_item.as_table_mut() {
+        if let Some(deps_item) = doc.get_mut(section)
+            && let Some(deps) = deps_item.as_table_mut() {
                 let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
 
                 for dep_key in dep_keys {
@@ -34,8 +34,8 @@ pub fn update_dependent_manifest(
                             Item::Value(v) if v.is_inline_table() => {
                                 if let Some(inline) = v.as_inline_table() {
                                     // Check package field
-                                    if let Some(pkg) = inline.get("package") {
-                                        if pkg.as_str() == Some(old_name) {
+                                    if let Some(pkg) = inline.get("package")
+                                        && pkg.as_str() == Some(old_name) {
                                             is_target = true;
                                             if name_changed {
                                                 let mut new_inline = inline.clone();
@@ -44,7 +44,6 @@ pub fn update_dependent_manifest(
                                                 needs_update = true;
                                             }
                                         }
-                                    }
 
                                     // Update path if needed
                                     if is_target && path_changed && inline.contains_key("path") {
@@ -70,8 +69,8 @@ pub fn update_dependent_manifest(
                                 }
                             }
                             Item::Table(table) => {
-                                if let Some(pkg) = table.get("package") {
-                                    if pkg.as_str() == Some(old_name) {
+                                if let Some(pkg) = table.get("package")
+                                    && pkg.as_str() == Some(old_name) {
                                         is_target = true;
                                         if name_changed {
                                             let mut new_table = table.clone();
@@ -80,7 +79,6 @@ pub fn update_dependent_manifest(
                                             needs_update = true;
                                         }
                                     }
-                                }
 
                                 if is_target && path_changed && table.contains_key("path") {
                                     let rel_path = pathdiff::diff_paths(new_dir, manifest_dir)
@@ -130,7 +128,6 @@ pub fn update_dependent_manifest(
                     }
                 }
             }
-        }
     }
 
     if changed {
@@ -162,8 +159,8 @@ pub fn update_workspace_members(
     let mut doc: DocumentMut = content.parse()?;
     let mut changed = false;
 
-    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut()) {
-        if let Some(members) = workspace.get_mut("members").and_then(|m| m.as_array_mut()) {
+    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut())
+        && let Some(members) = workspace.get_mut("members").and_then(|m| m.as_array_mut()) {
             let root_dir = root_path.parent().unwrap();
 
             let old_rel = pathdiff::diff_paths(old_dir, root_dir)
@@ -175,16 +172,14 @@ pub fn update_workspace_members(
             let new_str = new_rel.to_string_lossy();
 
             for i in 0..members.len() {
-                if let Some(member_path) = members.get(i).and_then(|v| v.as_str()) {
-                    if member_path == old_str.as_ref() {
+                if let Some(member_path) = members.get(i).and_then(|v| v.as_str())
+                    && member_path == old_str.as_ref() {
                         members.replace(i, new_str.as_ref());
                         changed = true;
                         break;
                     }
-                }
             }
         }
-    }
 
     if changed {
         txn.update_file(root_path.to_path_buf(), doc.to_string())?;

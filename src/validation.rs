@@ -74,12 +74,11 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
         .find(|p| p.name == args.old_name)
         .ok_or_else(|| RenameError::PackageNotFound(args.old_name.clone()))?;
 
-    if !args.skip_git_check {
-        if let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
+    if !args.skip_git_check
+        && let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
             log::warn!("{}", e);
             return Err(e);
         }
-    }
 
     Ok(())
 }
