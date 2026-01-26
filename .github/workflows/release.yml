@@ -33,7 +33,6 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-          override: true
 
       - name: Setup Cache
         uses: Swatinem/rust-cache@v2
@@ -65,11 +64,11 @@ jobs:
           Copy-Item "target/$Target/release/$Bin" -Destination $Dist
           Compress-Archive -Path "$Dist\$Bin" -DestinationPath "$Dist/cargo-rename-$Version-$Target.zip"
 
-            - name: Upload artifacts
-              uses: actions/upload-artifact@v4
-              with:
-                name: cargo-rename-${{ matrix.target }}
-                path: dist/*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-rename-${{ matrix.target }}
+          path: dist/*
 
   release:
     name: GitHub Release
