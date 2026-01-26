@@ -4,7 +4,24 @@
 [![Documentation](https://docs.rs/cargo-rename/badge.svg)](https://docs.rs/cargo-rename)
 [![License](https://img.shields.io/crates/l/cargo-rename.svg)](LICENSE)
 
-Safely rename Cargo packages and automatically update all references in your workspace.
+Rename Cargo packages with confidence.
+
+`cargo-rename` performs coordinated, workspace-wide updates to package manifests, directory paths, dependencies, and source code, keeping complex renames safe, consistent, and reversible.
+
+**You may be looking for**:
+
+- [Installation](#installation)
+- [Usage](#usage)
+- [CLI Options](#command-line-options)
+- [What Gets Updated](#what-gets-updated)
+- [Safety](#safety-features)
+- [Examples](#examples)
+- [Limitations](#limitations)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+- [FAQ](#faq)
 
 ## Features
 
@@ -291,12 +308,6 @@ Licensed under either of:
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
-
-## Acknowledgments
-
-- Built with [clap](https://github.com/clap-rs/clap) for CLI parsing
-- Uses [toml_edit](https://github.com/toml-rs/toml) for preserving TOML formatting
-- Inspired by real-world pain points in Rust workspace management
 
 ## FAQ
 
