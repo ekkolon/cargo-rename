@@ -26,6 +26,8 @@ jobs:
             target: x86_64-pc-windows-msvc
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,36 +35,41 @@ jobs:
           target: ${{ matrix.target }}
           override: true
 
-      - uses: actions/checkout@v4
+      - name: Setup Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Build binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package Linux/macOS
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          set -e
           BIN_NAME=cargo-rename
           TARGET=${{ matrix.target }}
           VERSION=${GITHUB_REF_NAME}
+          mkdir -p dist
+          cp target/$TARGET/release/$BIN_NAME dist/
+          cd dist
+          tar czf $BIN_NAME-$VERSION-$TARGET.tar.gz $BIN_NAME
 
-          mkdir dist
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Bin = "cargo-rename.exe"
+          $Version = "${{ github.ref_name }}"
+          $Target = "${{ matrix.target }}"
+          $Dist = "dist"
+          New-Item -ItemType Directory -Force -Path $Dist
+          Copy-Item "target/$Target/release/$Bin" -Destination $Dist
+          Compress-Archive -Path "$Dist\$Bin" -DestinationPath "$Dist/cargo-rename-$Version-$Target.zip"
 
-          if [[ "$TARGET" == *windows* ]]; then
-            cp target/$TARGET/release/$BIN_NAME.exe dist/
-            cd dist
-            zip $BIN_NAME-$VERSION-$TARGET.zip $BIN_NAME.exe
-          else
-            cp target/$TARGET/release/$BIN_NAME dist/
-            cd dist
-            tar czf $BIN_NAME-$VERSION-$TARGET.tar.gz $BIN_NAME
-          fi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-rename-${{ matrix.target }}
-          path: dist/*
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                name: cargo-rename-${{ matrix.target }}
+                path: dist/*
 
   release:
     name: GitHub Release
