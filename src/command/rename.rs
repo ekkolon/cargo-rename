@@ -26,7 +26,7 @@ pub struct RenameArgs {
     pub manifest_path: Option<PathBuf>,
 
     /// Preview changes without writing
-    #[arg(long, short = 'd')]
+    #[arg(long, short = 'n')]
     pub dry_run: bool,
 
     /// Skip confirmation prompt
@@ -35,7 +35,7 @@ pub struct RenameArgs {
 
     /// Skip git status check
     #[arg(long)]
-    pub skip_git_check: bool,
+    pub allow_dirty: bool,
 
     /// Create git commit after rename
     #[arg(long)]
