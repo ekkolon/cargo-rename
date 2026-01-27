@@ -12,7 +12,6 @@ use std::process::Command;
 /// - Must start with an ASCII letter
 /// - Can only contain ASCII alphanumerics, hyphens, and underscores
 /// - Cannot be empty
-/// - Cannot exceed 64 characters (practical limit)
 /// - Cannot be a reserved name (test, doc, build, bench)
 ///
 /// # Errors
@@ -59,19 +58,6 @@ pub fn validate_package_name(name: &str) -> Result<()> {
             ),
         ));
     }
-
-    // // Check length limit (practical limit, not hard Cargo requirement)
-    // const MAX_LENGTH: usize = 64;
-    // if name.len() > MAX_LENGTH {
-    //     return Err(RenameError::InvalidName(
-    //         name.to_string(),
-    //         format!(
-    //             "exceeds maximum length of {} characters (length: {})",
-    //             MAX_LENGTH,
-    //             name.len()
-    //         ),
-    //     ));
-    // }
 
     // Additional checks for common mistakes
     if name.starts_with('-') {
@@ -165,11 +151,11 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
                 "Git status command failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            Ok(()) // Fail gracefully
+            Ok(())
         }
         Err(e) => {
             log::warn!("Failed to execute git status: {}", e);
-            Ok(()) // Fail gracefully
+            Ok(())
         }
     }
 }
@@ -184,18 +170,18 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
 /// # Errors
 /// Returns first error encountered during checks.
 pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
-    // 1. Validate new package name
+    // Validate new package name
     validate_package_name(&args.new_name)?;
 
-    // 2. Verify old package exists
+    // Verify old package exists
     let _pkg = metadata
         .packages
         .iter()
         .find(|p| p.name == args.old_name)
         .ok_or_else(|| RenameError::PackageNotFound(args.old_name.clone()))?;
 
-    // 3. Check git status
-    if !args.skip_git_check
+    // Check git status
+    if !args.allow_dirty
         && let Err(e) = check_git_status(metadata.workspace_root.as_std_path())
     {
         log::error!("{}", e);
@@ -211,7 +197,7 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
         )));
     }
 
-    // 5. Check if target directory would conflict (for path operations)
+    // Check if target directory would conflict (for path operations)
     if args.mode.should_move_directory() {
         let pkg = metadata
             .packages
