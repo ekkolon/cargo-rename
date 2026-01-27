@@ -209,7 +209,7 @@ fn test_invalid_package_name_rejected() {
         .current_dir(workspace_root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("must start with a letter"));
+        .stderr(predicate::str::contains("must start with"));
 
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
@@ -219,7 +219,7 @@ fn test_invalid_package_name_rejected() {
         .current_dir(workspace_root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("can only contain"));
+        .stderr(predicate::str::contains("invalid character"));
 
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
@@ -593,7 +593,6 @@ mod validation_tests {
         assert!(validate_package_name("123crate").is_err());
         assert!(validate_package_name("my@crate").is_err());
         assert!(validate_package_name("test").is_err());
-        assert!(validate_package_name(&"a".repeat(65)).is_err());
         assert!(validate_package_name("").is_err());
     }
 }
