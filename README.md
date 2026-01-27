@@ -272,23 +272,6 @@ cargo test test_rename_package_name_only
 
 ### Project Structure
 
-```txt
-cargo-rename/
-├── src/
-│   ├── main.rs          # Entry point
-│   ├── cli.rs           # CLI parsing
-│   ├── error.rs         # Error types
-│   ├── validation.rs    # Pre-flight checks
-│   ├── transaction.rs   # Rollback system
-│   └── ops/
-│       ├── mod.rs       # Main orchestration
-│       ├── manifest.rs  # Cargo.toml updates
-│       └── content.rs   # Source code updates
-├── tests/
-│   └── integration_tests.rs
-└── Cargo.toml
-```
-
 ## Contributing
 
 Contributions welcome! Please:
