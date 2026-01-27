@@ -186,7 +186,7 @@ fn test_dry_run_makes_no_changes() {
         .current_dir(workspace_root)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dry run"));
+        .stdout(predicate::str::contains("No changes will be made"));
 
     let after_cargo = fs::read_to_string(workspace_root.join("crate-a/Cargo.toml")).unwrap();
     let after_dep = fs::read_to_string(workspace_root.join("crate-b/Cargo.toml")).unwrap();
@@ -194,6 +194,46 @@ fn test_dry_run_makes_no_changes() {
     assert_eq!(original_cargo, after_cargo);
     assert_eq!(original_dep, after_dep);
     assert!(workspace_root.join("crate-a").exists());
+}
+
+#[test]
+fn test_dry_run_shows_detailed_output() {
+    let temp = create_test_workspace();
+    let workspace_root = temp.path();
+
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    let assert = cmd
+        .arg("rename")
+        .arg("crate-a")
+        .arg("awesome-crate")
+        .arg("--dry-run")
+        .current_dir(workspace_root)
+        .assert()
+        .success();
+
+    let output = String::from_utf8_lossy(&assert.get_output().stdout);
+
+    // Verify detailed output is shown
+    assert!(output.contains("DRY RUN"));
+    assert!(output.contains("Package manifest"));
+    assert!(output.contains("Cargo.toml"));
+    assert!(output.contains("will be modified")); // e.g: "6 files will be modified"
+}
+
+#[test]
+fn test_verbose_flag_shows_progress() {
+    let temp = create_test_workspace();
+    let workspace_root = temp.path();
+
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    cmd.arg("rename")
+        .arg("crate-a")
+        .arg("new-name")
+        .arg("--yes")
+        .arg("--verbose")
+        .current_dir(workspace_root)
+        .assert()
+        .success();
 }
 
 #[test]
