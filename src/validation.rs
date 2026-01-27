@@ -195,12 +195,12 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
         .ok_or_else(|| RenameError::PackageNotFound(args.old_name.clone()))?;
 
     // 3. Check git status
-    if !args.skip_git_check {
-        if let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
-            log::error!("{}", e);
-            log::info!("Hint: Use --skip-git-check to bypass this check");
-            return Err(e);
-        }
+    if !args.skip_git_check
+        && let Err(e) = check_git_status(metadata.workspace_root.as_std_path())
+    {
+        log::error!("{}", e);
+        log::info!("Hint: Use --skip-git-check to bypass this check");
+        return Err(e);
     }
 
     // 4. Additional safety check: ensure new name differs from old name
