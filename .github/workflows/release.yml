@@ -11,7 +11,6 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    if: github.event_name == 'push' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
