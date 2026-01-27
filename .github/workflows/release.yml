@@ -65,7 +65,7 @@ jobs:
           Compress-Archive -Path "$Dist\$Bin" -DestinationPath "$Dist/cargo-rename-$Version-$Target.zip"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cargo-rename-${{ matrix.target }}
           path: dist/*
@@ -77,14 +77,12 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
+          files: dist/**/*
           generate_release_notes: true
