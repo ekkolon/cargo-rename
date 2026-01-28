@@ -229,6 +229,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         );
 
         // Git commit if requested
+        #[allow(deprecated)]
         if args.git_commit {
             match create_git_commit(&args, &metadata) {
                 Ok(_) => {
