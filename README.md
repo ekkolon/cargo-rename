@@ -4,47 +4,39 @@
 [![Documentation](https://docs.rs/cargo-rename/badge.svg)](https://docs.rs/cargo-rename)
 [![License](https://img.shields.io/crates/l/cargo-rename.svg)](LICENSE)
 
-Rename Cargo packages with confidence.
+Rename Cargo packages safely and consistently across an entire workspace.
 
-`cargo-rename` performs coordinated, workspace-wide updates to package manifests, directory paths, dependencies, and source code, keeping complex renames safe, consistent, and reversible.
+`cargo-rename` performs coordinated updates to package manifests, workspace configuration, directory paths, and Rust source code. It is designed for non-trivial renames where manual edits are error-prone and incomplete.
 
-**You may be looking for**:
+A renaming operation is **transactional**, meaning that if any step fails, all changes are rolled back.
+
+---
+
+## Contents
 
 - [Installation](#installation)
 - [Usage](#usage)
-- [CLI Options](#command-line-options)
-- [What Gets Updated](#what-gets-updated)
-- [Safety](#safety-features)
+- [Command-line options](#command-line-options)
 - [Examples](#examples)
+- [What gets updated](#what-gets-updated)
+- [Safety model](#safety-model)
 - [Limitations](#limitations)
-- [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
 - [FAQ](#faq)
 
-## Features
-
-- ✅ **Rename package names** in Cargo.toml
-- ✅ **Move package directories** to match new names
-- ✅ **Update all workspace dependencies** automatically
-- ✅ **Update source code references** (use statements, extern crate, etc.)
-- ✅ **Handle package aliases** (`package = "..."` syntax)
-- ✅ **Support dev-dependencies and build-dependencies**
-- ✅ **Dry-run mode** to preview changes
-- ✅ **Transaction-based rollback** on errors
-- ✅ **Git integration** (optional commit creation)
-- ✅ **Workspace verification** after changes
+---
 
 ## Installation
 
-### Install from crates.io
+### From crates.io
 
 ```bash
 cargo install cargo-rename
 ```
 
-### Install from GitHub Repository
+### From GitHub
 
 ```bash
 cargo install --git https://github.com/ekkolon/cargo-rename
@@ -52,33 +44,94 @@ cargo install --git https://github.com/ekkolon/cargo-rename
 
 ## Usage
 
-### Basic Examples
+### Basic operations
 
 ```bash
-# Rename package name only (default)
+# Rename the package name (default)
 cargo rename old-crate new-crate
 
-# Rename directory only (keeps package name)
+# Rename the directory only (package name unchanged)
 cargo rename old-crate new-dir --path-only
 
 # Rename both package name and directory
 cargo rename old-crate new-crate --both
 
-# Preview changes without applying them
+# Preview changes without writing anything
 cargo rename old-crate new-crate --dry-run
 
 # Skip confirmation prompt
 cargo rename old-crate new-crate --yes
-
-# Create a git commit after successful rename
-cargo rename old-crate new-crate --git-commit
 ```
 
-### Workspace Example
+### Command-line options
 
-Given a workspace structure:
+```text
+cargo rename [OPTIONS] <OLD_NAME> <NEW_NAME>
 
-```txt
+Arguments:
+  <OLD_NAME>   Current package name
+  <NEW_NAME>   New package or directory name
+
+Options:
+      --name-only               Rename the package name only (default)
+      --path-only               Rename/move the directory only
+  -b, --both                    Rename both package and directory
+      --manifest-path <PATH>    Path to Cargo.toml
+  -n, --dry-run                 Preview changes without applying them
+  -y, --yes                     Skip confirmation prompt
+      --allow-dirty             Allow uncommitted git changes
+  -v, --verbose                 Show detailed progress information
+  -h, --help                    Print help
+  -V, --version                 Print version
+```
+
+## Examples
+
+### Renaming a dependency with an alias
+
+**Before**:
+
+```toml
+[dependencies]
+my-alias = { package = "old-crate", path = "../old-crate" }
+```
+
+```bash
+cargo rename old-crate new-crate
+```
+
+**After**:
+
+```toml
+[dependencies]
+my-alias = { package = "new-crate", path = "../old-crate" }
+```
+
+### Directory-only rename
+
+```bash
+cargo rename my-crate crates/utils --path-only
+```
+
+Useful when reorganizing workspace layout without changing the published package name.
+
+### Dry run first
+
+```bash
+cargo rename old-crate new-crate --dry-run
+```
+
+Review the planned changes, then apply:
+
+```bash
+cargo rename old-crate new-crate --yes
+```
+
+### Workspace example
+
+**Given a workspace**:
+
+```perl
 my-workspace/
 ├── Cargo.toml
 ├── crates/
@@ -86,170 +139,78 @@ my-workspace/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   └── my-app/
-│       ├── Cargo.toml (depends on my-lib)
+│       ├── Cargo.toml
 │       └── src/
 ```
 
 **Running**:
 
 ```bash
-cd my-workspace
 cargo rename my-lib awesome-lib --both
 ```
 
-**Will update**:
+**Will**:
 
-- `crates/my-lib/Cargo.toml` → package name to "awesome-lib"
-- `crates/my-lib/` → moved to `crates/awesome-lib/`
-- `crates/my-app/Cargo.toml` → dependency path updated
-- `crates/my-app/src/*.rs` → `use my_lib` → `use awesome_lib`
-- Root `Cargo.toml` → workspace members list
+- Rename the package in `crates/my-lib/Cargo.toml`
+- Move `crates/my-lib/` => `crates/awesome-lib/`
+- Update all workspace dependency entries
+- Rewrite Rust source references (use my_lib::…)
+- Update the workspace members list
 
-## Command-Line Options
+## What gets updated
 
-```bash
-cargo rename [OPTIONS] <OLD_NAME> <NEW_NAME>
+### Cargo manifests
 
-Arguments:
-  <OLD_NAME>  Current name of the package
-  <NEW_NAME>  New name for the package
+- `[package].name`
+- Dependency entries in:
+  - `[dependencies]`
+  - `[dev-dependencies]`
+  - `[build-dependencies]`
+- Path dependencies when directories move
+- Aliased dependencies using `package = "..."`
+- Workspace `members` list
 
-Options:
-      --name-only               Only rename the package name (default)
-      --path-only               Only move/rename the directory
-  -b, --both                    Rename both name and directory
-      --manifest-path <PATH>    Path to Cargo.toml
-  -d, --dry-run                 Preview changes without writing
-  -y, --yes                     Skip confirmation prompt
-      --skip-git-check          Skip checking for uncommitted changes
-      --git-commit              Create git commit after rename
-  -h, --help                    Print help
-  -V, --version                 Print version
+### Rust source code
+
+- `use old_crate::...`
+- `extern crate old_crate::...`
+- Fully-qualified paths (`old_crate::module::...`)
+
+## Safety model
+
+### Pre-flight checks
+
+Before making any changes, `cargo-rename` verifies:
+
+- The target package exists
+- The new name is valid according to Cargo rules
+- The destination directory does not already exist
+- The git working tree is clean (unless `--allow-dirty` is used)
+
+### Transactional execution
+
+All filesystem and manifest changes are tracked. If any step fails, the tool attempts to restore the workspace to its original state.
+
+**Conceptually**:
+
+```text
+update manifests
+update source code
+move directory
+verify workspace
 ```
 
-## What Gets Updated
-
-### Package Manifests
-
-- Package name in `[package]` section
-- Dependency references in `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`
-- Path dependencies (when directory moves)
-- Package aliases (`my-alias = { package = "old-name", ... }`)
-- Workspace members list
-
-### Source Code
-
-- `use old_crate::*` → `use new_crate::*`
-- `extern crate old_crate` → `extern crate new_crate`
-- Module paths: `old_crate::module::*`
-
-### Documentation
-
-- Package name in README.md files
-- References in other .md and .toml files
-
-## Safety Features
-
-### Pre-flight Checks
-
-- Validates new package name against Cargo rules
-- Checks that target package exists
-- Verifies no uncommitted git changes (optional)
-- Confirms target directory doesn't exist
-
-### Transaction System
-
-All changes are tracked and can be rolled back atomically if any step fails:
-
-```rust
-// Pseudocode
-transaction {
-    update_manifest_1()  ✓
-    update_manifest_2()  ✓
-    move_directory()     ✗ ERROR!
-    // Automatic rollback of all changes
-}
-```
-
-### Validation
-
-After successful rename, runs `cargo metadata` to ensure workspace is still valid.
-
-## Examples
-
-### Rename with Package Alias
-
-```toml
-# Before
-[dependencies]
-my-alias = { package = "old-crate", path = "../old-crate" }
-```
-
-```bash
-cargo rename old-crate new-crate --name-only
-```
-
-```toml
-# After
-[dependencies]
-my-alias = { package = "new-crate", path = "../old-crate" }
-```
-
-### Directory-Only Rename
-
-```bash
-# Move crate to new directory without changing package name
-cargo rename my-crate new-directory --path-only
-```
-
-Useful for reorganizing workspace structure without breaking published package names.
-
-### Dry Run First
-
-```bash
-# Preview all changes
-cargo rename old-crate new-crate --dry-run
-
-# If looks good, apply changes
-cargo rename old-crate new-crate --yes
-```
+If verification fails, all prior changes are rolled back.
 
 ## Limitations
 
-- **Published crates**: Renaming published crates doesn't update crates.io. Use this for workspace-internal crates or pre-publication.
-- **Binary names**: Only updates package name, not `[[bin]]` names.
-- **Complex macros**: May not catch all macro-generated references.
-- **External workspaces**: Only updates references within the same workspace.
-
-## Troubleshooting
-
-### "Workspace verification failed"
-
-If verification fails after rename:
-
-1. Check `Cargo.toml` syntax with `cargo check`
-2. Ensure all paths are correct
-3. Run `cargo update` to refresh Cargo.lock
-4. Use `--skip-git-check` if git errors occur
-
-### "Package not found"
-
-- Ensure you're running from workspace root
-- Use `--manifest-path` to specify exact Cargo.toml location
-- Check package name matches exactly (case-sensitive)
-
-### Rollback Didn't Complete
-
-In rare cases, rollback may fail. Manual fixes:
-
-```bash
-git reset --hard  # If using git
-cargo clean       # Clean build artifacts
-```
+- Binary names (`[[bin]]`) are not modified
+- Macro-generated references may not be detected
+- Only references inside the same workspace are updated.
 
 ## Development
 
-### Building from Source
+### Build from source
 
 ```bash
 git clone https://github.com/ekkolon/cargo-rename
@@ -257,54 +218,40 @@ cd cargo-rename
 cargo build --release
 ```
 
-### Running Tests
+### Run tests
 
 ```bash
-# Unit and integration tests
 cargo test
-
-# With logging
 RUST_LOG=debug cargo test
-
-# Specific test
-cargo test test_rename_package_name_only
 ```
-
-### Project Structure
 
 ## Contributing
 
-Contributions welcome! Please:
+Contributions are welcome.
 
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass: `cargo test`
-5. Run `cargo fmt` and `cargo clippy`
-6. Submit a pull request
+- Keep changes focused
+- Add tests for behavior changes
+- Ensure `cargo fmt` and `cargo clippy` pass
+- Prefer correctness and clarity over convenience
+- Submit PR
 
 ## License
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+- MIT License
+- Apache License, Version 2.0
 
 ## FAQ
 
-**Q: Can I undo a rename?**  
-A: Use git to revert (`git reset --hard`), or rename back using the tool.
+### Can I undo a rename?
 
-**Q: Does this work with non-workspace crates?**  
-A: Yes! Works for both standalone crates and workspace members.
+Yes. Use git to revert, or rename back using the tool.
 
-**Q: Will this update crates.io?**  
-A: No. This tool only updates local files. Publishing a renamed crate creates a new package on crates.io.
+### Does this work outside a workspace?
 
-**Q: What about binary names?**  
-A: Currently only updates package names. Binary names in `[[bin]]` sections are unchanged.
+Yes. It works for both single crates and workspace members.
 
-**Q: Can I rename multiple packages at once?**  
-A: Not currently supported. Rename packages one at a time.
+### Can I rename multiple packages at once?
+
+No. Packages must be renamed individually.

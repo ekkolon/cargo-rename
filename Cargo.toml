@@ -3,11 +3,12 @@ name = "cargo-rename"
 version = "0.1.0"
 edition = "2024"
 authors = ["Nelson Dominguez <ekkolon@proton.me>"]
-description = "Safely rename Cargo packages and update all workspace references"
+description = "Rename Cargo packages with confidence"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ekkolon/cargo-rename"
 keywords = ["cargo", "rename", "refactor", "workspace"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+include = ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "src/**/*.rs"]
 
 [[bin]]
 name = "cargo-rename"
@@ -16,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 cargo_metadata = "0.23"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
 colored = "3.1"
 log = "0.4"
 pathdiff = "0.2"

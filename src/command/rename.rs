@@ -14,49 +14,58 @@ pub struct RenameArgs {
     /// Current name of the package to rename
     pub old_name: String,
 
-    /// New name for the package
+    /// New name of the package
     pub new_name: String,
 
     /// Operation mode
     #[command(flatten)]
     pub mode: RenameMode,
 
-    /// Path to Cargo.toml
+    /// Path to the workspace Cargo.toml (defaults to current directory)
     #[arg(long, value_name = "PATH")]
     pub manifest_path: Option<PathBuf>,
 
-    /// Preview changes without writing
+    /// Show what would change without applying any modifications
     #[arg(long, short = 'n')]
     pub dry_run: bool,
 
-    /// Skip confirmation prompt
+    /// Skip the interactive confirmation prompt
     #[arg(long, short = 'y')]
     pub yes: bool,
 
-    /// Skip git status check
+    /// Allow renaming even if the git workspace has uncommitted changes
     #[arg(long)]
     pub allow_dirty: bool,
 
-    /// Create git commit after rename
+    /// Create a git commit after a successful rename
+    #[deprecated = "Will be removed in the next release"]
     #[arg(long)]
     pub git_commit: bool,
 
-    /// Show detailed progress information
+    /// Enable verbose output showing each operation step
     #[arg(long, short = 'v')]
     pub verbose: bool,
 }
 
 #[derive(Debug, Clone, clap::Args)]
+#[group(multiple = false)]
 pub struct RenameMode {
-    /// Only rename package name (default)
+    /// Rename the package name only (default)
+    ///
+    /// Updates Cargo.toml, workspace dependencies, and source code,
+    /// but keeps the directory name unchanged.
     #[arg(long, group = "mode")]
     pub name_only: bool,
 
-    /// Only move/rename directory
+    /// Move or rename the package directory only
+    ///
+    /// Updates workspace paths but keeps the package name unchanged.
     #[arg(long, group = "mode")]
     pub path_only: bool,
 
-    /// Rename both name and directory
+    /// Rename both the package name and its directory
+    ///
+    /// Equivalent to combining --name-only and --path-only.
     #[arg(long, short = 'b', group = "mode")]
     pub both: bool,
 }
@@ -235,6 +244,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
     Ok(())
 }
 
+#[deprecated = "Will be removed in the next release"]
 fn create_git_commit(args: &RenameArgs, metadata: &cargo_metadata::Metadata) -> Result<()> {
     use std::process::Command;
 
