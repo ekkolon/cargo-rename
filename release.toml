@@ -1,0 +1,23 @@
+allow-branch = ["main"]
+
+sign-commit = true
+sign-tag = true
+
+release = true
+
+shared-version = false
+dependent-version = "upgrade"
+metadata = "optional"
+
+consolidate-commits = true
+pre-release-replacements = []
+pre-release-commit-message = "chore: release v{{version}}"
+
+tag = true
+tag-message = "chore: release v{{version}}"
+tag-name = "v{{version}}"
+
+push = true
+push-remote = "origin"
+
+publish = false
