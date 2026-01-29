@@ -37,11 +37,6 @@ pub struct RenameArgs {
     #[arg(long)]
     pub allow_dirty: bool,
 
-    /// Create a git commit after a successful rename
-    #[deprecated = "Will be removed in the next release"]
-    #[arg(long)]
-    pub git_commit: bool,
-
     /// Enable verbose output showing each operation step
     #[arg(long, short = 'v')]
     pub verbose: bool,
@@ -227,51 +222,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
             args.old_name.yellow(),
             args.new_name.green().bold()
         );
-
-        // Git commit if requested
-        #[allow(deprecated)]
-        if args.git_commit {
-            match create_git_commit(&args, &metadata) {
-                Ok(_) => {
-                    println!("{} Created git commit", "✓".green());
-                }
-                Err(e) => {
-                    eprintln!("{} Failed to create git commit: {}", "⚠".yellow(), e);
-                }
-            }
-        }
     }
 
-    Ok(())
-}
-
-#[deprecated = "Will be removed in the next release"]
-fn create_git_commit(args: &RenameArgs, metadata: &cargo_metadata::Metadata) -> Result<()> {
-    use std::process::Command;
-
-    let workspace_root = metadata.workspace_root.as_std_path();
-    let message = format!("Rename {} to {}", args.old_name, args.new_name);
-
-    // Stage all changes
-    let status = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(workspace_root)
-        .status()?;
-
-    if !status.success() {
-        return Err(RenameError::Other(anyhow::anyhow!("git add failed")));
-    }
-
-    // Create commit
-    let status = Command::new("git")
-        .args(["commit", "-m", &message])
-        .current_dir(workspace_root)
-        .status()?;
-
-    if !status.success() {
-        return Err(RenameError::Other(anyhow::anyhow!("git commit failed")));
-    }
-
-    log::info!("Created git commit: {}", message);
     Ok(())
 }
