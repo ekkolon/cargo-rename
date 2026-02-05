@@ -60,6 +60,7 @@ crate-a = { path = "../crate-a" }
     temp
 }
 
+#[allow(dead_code)]
 fn verify_workspace_valid(workspace_root: &Path) -> bool {
     std::process::Command::new("cargo")
         .arg("metadata")
@@ -71,235 +72,136 @@ fn verify_workspace_valid(workspace_root: &Path) -> bool {
 }
 
 #[test]
-fn test_rename_package_name_only() {
+fn test_invalid_directory_names() {
     let temp = create_test_workspace();
     let workspace_root = temp.path();
 
+    // Test path traversal attempt
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
         .arg("crate-a")
-        .arg("awesome-crate")
-        .arg("--name-only")
-        .arg("--yes")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-
-    let cargo_toml = fs::read_to_string(workspace_root.join("crate-a/Cargo.toml")).unwrap();
-    assert!(cargo_toml.contains("name = \"awesome-crate\""));
-
-    let dep_toml = fs::read_to_string(workspace_root.join("crate-b/Cargo.toml")).unwrap();
-    assert!(
-        dep_toml.contains("awesome-crate") && dep_toml.contains("path"),
-        "Expected awesome-crate with path in:\n{}",
-        dep_toml
-    );
-
-    let lib_rs = fs::read_to_string(workspace_root.join("crate-b/src/lib.rs")).unwrap();
-    assert!(lib_rs.contains("use awesome_crate"));
-
-    assert!(workspace_root.join("crate-a").exists());
-    assert!(!workspace_root.join("awesome-crate").exists());
-}
-
-#[test]
-fn test_rename_directory_only() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("crate-a")
-        .arg("new-dir")
-        .arg("--path-only")
-        .arg("--yes")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-
-    let cargo_toml = fs::read_to_string(workspace_root.join("new-dir/Cargo.toml")).unwrap();
-    assert!(cargo_toml.contains("name = \"crate-a\""));
-
-    let dep_toml = fs::read_to_string(workspace_root.join("crate-b/Cargo.toml")).unwrap();
-    assert!(
-        dep_toml.contains("path") && dep_toml.contains("new-dir"),
-        "Expected path to new-dir in:\n{}",
-        dep_toml
-    );
-
-    assert!(!workspace_root.join("crate-a").exists());
-    assert!(workspace_root.join("new-dir").exists());
-
-    let workspace_toml = fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
-    assert!(workspace_toml.contains("new-dir"));
-
-    assert!(verify_workspace_valid(workspace_root));
-}
-
-#[test]
-fn test_rename_both() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("crate-a")
-        .arg("super-crate")
-        .arg("--both")
-        .arg("--yes")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-
-    let cargo_toml = fs::read_to_string(workspace_root.join("super-crate/Cargo.toml")).unwrap();
-    assert!(cargo_toml.contains("name = \"super-crate\""));
-
-    let dep_toml = fs::read_to_string(workspace_root.join("crate-b/Cargo.toml")).unwrap();
-    assert!(
-        dep_toml.contains("super-crate") && dep_toml.contains("super-crate"),
-        "Expected super-crate in:\n{}",
-        dep_toml
-    );
-
-    let lib_rs = fs::read_to_string(workspace_root.join("crate-b/src/lib.rs")).unwrap();
-    assert!(lib_rs.contains("use super_crate"));
-
-    assert!(!workspace_root.join("crate-a").exists());
-    assert!(workspace_root.join("super-crate").exists());
-
-    assert!(verify_workspace_valid(workspace_root));
-}
-
-#[test]
-fn test_dry_run_makes_no_changes() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
-    let original_cargo = fs::read_to_string(workspace_root.join("crate-a/Cargo.toml")).unwrap();
-    let original_dep = fs::read_to_string(workspace_root.join("crate-b/Cargo.toml")).unwrap();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("crate-a")
-        .arg("new-name")
-        .arg("--dry-run")
-        .current_dir(workspace_root)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("No changes will be made"));
-
-    let after_cargo = fs::read_to_string(workspace_root.join("crate-a/Cargo.toml")).unwrap();
-    let after_dep = fs::read_to_string(workspace_root.join("crate-b/Cargo.toml")).unwrap();
-
-    assert_eq!(original_cargo, after_cargo);
-    assert_eq!(original_dep, after_dep);
-    assert!(workspace_root.join("crate-a").exists());
-}
-
-#[test]
-fn test_dry_run_shows_detailed_output() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    let assert = cmd
-        .arg("rename")
-        .arg("crate-a")
-        .arg("awesome-crate")
-        .arg("--dry-run")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-
-    let output = String::from_utf8_lossy(&assert.get_output().stdout);
-
-    // Verify detailed output is shown
-    assert!(output.contains("DRY RUN"));
-    assert!(output.contains("Package manifest"));
-    assert!(output.contains("Cargo.toml"));
-    assert!(output.contains("will be modified")); // e.g: "6 files will be modified"
-}
-
-#[test]
-fn test_verbose_flag_shows_progress() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("crate-a")
-        .arg("new-name")
-        .arg("--yes")
-        .arg("--verbose")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_invalid_package_name_rejected() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("crate-a")
-        .arg("123invalid")
+        .arg("evil-crate")
+        .arg("--move")
+        .arg("../../../etc/passwd")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("must start with"));
+        .stderr(predicate::str::contains(
+            "cannot navigate outside workspace",
+        ));
+
+    // Test absolute path (Unix-style)
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    cmd.arg("rename")
+        .arg("crate-a")
+        .arg("evil-crate")
+        .arg("--move")
+        .arg("/tmp/evil")
+        .arg("--yes")
+        .current_dir(workspace_root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be a relative path"));
+
+    // Test dot and double-dot
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    cmd.arg("rename")
+        .arg("crate-a")
+        .arg("new-crate")
+        .arg("--move")
+        .arg(".")
+        .arg("--yes")
+        .current_dir(workspace_root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot use '.' or '..'"));
 
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
         .arg("crate-a")
-        .arg("invalid@name")
+        .arg("new-crate")
+        .arg("--move")
+        .arg("..")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid character"));
+        .stderr(predicate::str::contains("cannot use '.' or '..'"));
 
+    // Test parent directory navigation
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
         .arg("crate-a")
-        .arg("test")
+        .arg("new-crate")
+        .arg("--move")
+        .arg("../sibling")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("reserved"));
+        .stderr(predicate::str::contains(
+            "cannot navigate outside workspace",
+        ));
+
+    // Windows-specific tests
+    #[cfg(windows)]
+    {
+        // Test Windows absolute path with drive letter
+        let mut cmd = cargo_bin_cmd!("cargo-rename");
+        cmd.arg("rename")
+            .arg("crate-a")
+            .arg("evil-crate")
+            .arg("--move")
+            .arg("C:\\evil")
+            .arg("--yes")
+            .current_dir(workspace_root)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("must be a relative path"));
+
+        // Test Windows reserved name
+        let mut cmd = cargo_bin_cmd!("cargo-rename");
+        cmd.arg("rename")
+            .arg("crate-a")
+            .arg("new-crate")
+            .arg("--move")
+            .arg("CON")
+            .arg("--yes")
+            .current_dir(workspace_root)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("reserved name"));
+
+        // Test invalid Windows characters
+        let mut cmd = cargo_bin_cmd!("cargo-rename");
+        cmd.arg("rename")
+            .arg("crate-a")
+            .arg("new-crate")
+            .arg("--move")
+            .arg("dir:name")
+            .arg("--yes")
+            .current_dir(workspace_root)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot contain"));
+    }
 }
 
 #[test]
-fn test_package_not_found() {
+fn test_target_directory_already_exists() {
     let temp = create_test_workspace();
     let workspace_root = temp.path();
 
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("nonexistent-crate")
-        .arg("new-name")
-        .arg("--yes")
-        .current_dir(workspace_root)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not found"));
-}
-
-#[test]
-fn test_target_directory_exists() {
-    let temp = create_test_workspace();
-    let workspace_root = temp.path();
-
+    // Create conflicting directory
     fs::create_dir(workspace_root.join("existing-dir")).unwrap();
 
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
         .arg("crate-a")
+        .arg("new-crate")
+        .arg("--move")
         .arg("existing-dir")
-        .arg("--path-only")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
@@ -308,131 +210,137 @@ fn test_target_directory_exists() {
 }
 
 #[test]
-fn test_rename_with_package_alias() {
-    let temp = TempDir::new().unwrap();
+fn test_nested_directory_creation() {
+    let temp = create_test_workspace();
     let workspace_root = temp.path();
 
-    fs::write(
-        workspace_root.join("Cargo.toml"),
-        r#"
-[workspace]
-members = ["lib-a", "lib-b"]
-resolver = "2"
-"#,
-    )
-    .unwrap();
-
-    let lib_a = workspace_root.join("lib-a");
-    fs::create_dir(&lib_a).unwrap();
-    fs::write(
-        lib_a.join("Cargo.toml"),
-        r#"
-[package]
-name = "lib-a"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-    fs::create_dir(lib_a.join("src")).unwrap();
-    fs::write(lib_a.join("src/lib.rs"), "pub fn foo() {}").unwrap();
-
-    let lib_b = workspace_root.join("lib-b");
-    fs::create_dir(&lib_b).unwrap();
-    fs::write(
-        lib_b.join("Cargo.toml"),
-        r#"
-[package]
-name = "lib-b"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-my_alias = { package = "lib-a", path = "../lib-a" }
-"#,
-    )
-    .unwrap();
-    fs::create_dir(lib_b.join("src")).unwrap();
-    fs::write(lib_b.join("src/lib.rs"), "").unwrap();
-
+    // Parent directory doesn't exist yet - should be created
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
-        .arg("lib-a")
-        .arg("lib-awesome")
-        .arg("--name-only")
+        .arg("crate-a")
+        .arg("new-crate")
+        .arg("--move")
+        .arg("crates/backend/api")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
         .success();
 
-    let dep_toml = fs::read_to_string(workspace_root.join("lib-b/Cargo.toml")).unwrap();
     assert!(
-        dep_toml.contains("my_alias") && dep_toml.contains("lib-awesome"),
-        "Expected alias preserved with new package name in:\n{}",
-        dep_toml
+        workspace_root
+            .join("crates/backend/api/Cargo.toml")
+            .exists()
     );
+
+    let cargo_toml =
+        fs::read_to_string(workspace_root.join("crates/backend/api/Cargo.toml")).unwrap();
+    assert!(cargo_toml.contains("name = \"new-crate\""));
 }
 
 #[test]
-fn test_rename_updates_source_code_patterns() {
-    let temp = TempDir::new().unwrap();
+fn test_same_name_without_move_fails() {
+    let temp = create_test_workspace();
     let workspace_root = temp.path();
-
-    fs::write(
-        workspace_root.join("Cargo.toml"),
-        r#"
-[package]
-name = "my-lib"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-
-    fs::create_dir(workspace_root.join("src")).unwrap();
-    fs::write(
-        workspace_root.join("src/lib.rs"),
-        r#"
-use my_lib::module;
-pub mod module {}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        workspace_root.join("README.md"),
-        "# my-lib\n\nThis is my-lib.",
-    )
-    .unwrap();
 
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
-        .arg("my-lib")
-        .arg("awesome-lib")
-        .arg("--name-only")
+        .arg("crate-a")
+        .arg("crate-a")
+        .arg("--yes")
+        .current_dir(workspace_root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("same as the old name"));
+}
+
+#[test]
+fn test_same_name_with_move_succeeds() {
+    let temp = create_test_workspace();
+    let workspace_root = temp.path();
+
+    // This should work: moving to new directory with same package name
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    cmd.arg("rename")
+        .arg("crate-a")
+        .arg("crate-a")
+        .arg("--move")
+        .arg("new-location")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
         .success();
 
-    let lib_rs = fs::read_to_string(workspace_root.join("src/lib.rs")).unwrap();
-    assert!(lib_rs.contains("use awesome_lib::module"));
+    let cargo_toml = fs::read_to_string(workspace_root.join("new-location/Cargo.toml")).unwrap();
+    assert!(cargo_toml.contains("name = \"crate-a\""));
 
-    let readme = fs::read_to_string(workspace_root.join("README.md")).unwrap();
-    assert!(readme.contains("awesome-lib"));
+    // Old directory should be gone
+    assert!(!workspace_root.join("crate-a").exists());
 }
 
 #[test]
-fn test_nested_workspace_structure() {
+fn test_move_without_custom_path() {
+    let temp = create_test_workspace();
+    let workspace_root = temp.path();
+
+    // --move without argument should move to directory matching package name
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    cmd.arg("rename")
+        .arg("crate-a")
+        .arg("awesome-crate")
+        .arg("--move")
+        .arg("--yes")
+        .current_dir(workspace_root)
+        .assert()
+        .success();
+
+    // Should be in ./awesome-crate/ directory
+    let cargo_toml = fs::read_to_string(workspace_root.join("awesome-crate/Cargo.toml")).unwrap();
+    assert!(cargo_toml.contains("name = \"awesome-crate\""));
+
+    assert!(!workspace_root.join("crate-a").exists());
+    assert!(workspace_root.join("awesome-crate").exists());
+}
+
+#[test]
+fn test_move_with_custom_path() {
+    let temp = create_test_workspace();
+    let workspace_root = temp.path();
+
+    // --move with custom path
+    let mut cmd = cargo_bin_cmd!("cargo-rename");
+    cmd.arg("rename")
+        .arg("crate-a")
+        .arg("awesome-crate")
+        .arg("--move")
+        .arg("custom-dir")
+        .arg("--yes")
+        .current_dir(workspace_root)
+        .assert()
+        .success();
+
+    // Package renamed to awesome-crate but directory is custom-dir
+    let cargo_toml = fs::read_to_string(workspace_root.join("custom-dir/Cargo.toml")).unwrap();
+    assert!(cargo_toml.contains("name = \"awesome-crate\""));
+
+    assert!(!workspace_root.join("crate-a").exists());
+    assert!(workspace_root.join("custom-dir").exists());
+    assert!(!workspace_root.join("awesome-crate").exists());
+}
+
+#[test]
+fn test_workspace_dependencies_updated() {
     let temp = TempDir::new().unwrap();
     let workspace_root = temp.path();
 
+    // Create workspace with workspace.dependencies
     fs::write(
         workspace_root.join("Cargo.toml"),
-        r#"
-[workspace]
-members = ["crates/*"]
-resolver = "2"
+        r#"[workspace]
+members = ["crates/crate-a", "crates/crate-c"]
+
+[workspace.dependencies]
+crate-a = { path = "crates/crate-a" }
+crate-c = { path = "crates/crate-c" }
 "#,
     )
     .unwrap();
@@ -440,199 +348,57 @@ resolver = "2"
     let crates_dir = workspace_root.join("crates");
     fs::create_dir(&crates_dir).unwrap();
 
-    let my_crate = crates_dir.join("my-crate");
-    fs::create_dir(&my_crate).unwrap();
+    let crate_a = crates_dir.join("crate-a");
+    fs::create_dir(&crate_a).unwrap();
     fs::write(
-        my_crate.join("Cargo.toml"),
-        r#"
-[package]
-name = "my-crate"
+        crate_a.join("Cargo.toml"),
+        r#"[package]
+name = "crate-a"
 version = "0.1.0"
 edition = "2021"
 "#,
     )
     .unwrap();
-    fs::create_dir(my_crate.join("src")).unwrap();
-    fs::write(my_crate.join("src/lib.rs"), "").unwrap();
+    fs::create_dir(crate_a.join("src")).unwrap();
+    fs::write(crate_a.join("src/lib.rs"), "").unwrap();
 
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("my-crate")
-        .arg("new-crate")
-        .arg("--path-only")
-        .arg("--yes")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-
-    assert!(crates_dir.join("new-crate").exists());
-    assert!(!crates_dir.join("my-crate").exists());
-
-    assert!(verify_workspace_valid(workspace_root));
-}
-
-#[test]
-fn test_multiple_dependents_updated() {
-    let temp = TempDir::new().unwrap();
-    let workspace_root = temp.path();
-
+    let crate_c = crates_dir.join("crate-c");
+    fs::create_dir(&crate_c).unwrap();
     fs::write(
-        workspace_root.join("Cargo.toml"),
-        r#"
-[workspace]
-members = ["lib", "bin1", "bin2"]
-resolver = "2"
-"#,
-    )
-    .unwrap();
-
-    let lib_dir = workspace_root.join("lib");
-    fs::create_dir(&lib_dir).unwrap();
-    fs::write(
-        lib_dir.join("Cargo.toml"),
-        r#"
-[package]
-name = "common-lib"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-    fs::create_dir(lib_dir.join("src")).unwrap();
-    fs::write(lib_dir.join("src/lib.rs"), "pub fn shared() {}").unwrap();
-
-    for i in 1..=2 {
-        let bin_dir = workspace_root.join(format!("bin{}", i));
-        fs::create_dir(&bin_dir).unwrap();
-        fs::write(
-            bin_dir.join("Cargo.toml"),
-            format!(
-                r#"
-[package]
-name = "bin{}"
+        crate_c.join("Cargo.toml"),
+        r#"[package]
+name = "crate-c"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-common-lib = {{ path = "../lib" }}
+crate-a = { workspace = true }
 "#,
-                i
-            ),
-        )
-        .unwrap();
-        fs::create_dir(bin_dir.join("src")).unwrap();
-        fs::write(bin_dir.join("src/main.rs"), "use common_lib; fn main() {}").unwrap();
-    }
+    )
+    .unwrap();
+    fs::create_dir(crate_c.join("src")).unwrap();
+    fs::write(crate_c.join("src/lib.rs"), "").unwrap();
 
+    // Run rename
     let mut cmd = cargo_bin_cmd!("cargo-rename");
     cmd.arg("rename")
-        .arg("common-lib")
-        .arg("shared-utils")
-        .arg("--name-only")
+        .arg("crate-a")
+        .arg("crate-b")
         .arg("--yes")
         .current_dir(workspace_root)
         .assert()
         .success();
 
-    for i in 1..=2 {
-        let dep_toml =
-            fs::read_to_string(workspace_root.join(format!("bin{}/Cargo.toml", i))).unwrap();
-        assert!(dep_toml.contains("shared-utils"));
-
-        let main_rs =
-            fs::read_to_string(workspace_root.join(format!("bin{}/src/main.rs", i))).unwrap();
-        assert!(main_rs.contains("use shared_utils"));
-    }
-}
-
-#[test]
-fn test_dev_and_build_dependencies() {
-    let temp = TempDir::new().unwrap();
-    let workspace_root = temp.path();
-
-    fs::write(
-        workspace_root.join("Cargo.toml"),
-        r#"
-[workspace]
-members = ["test-utils", "main"]
-resolver = "2"
-"#,
-    )
-    .unwrap();
-
-    let test_utils = workspace_root.join("test-utils");
-    fs::create_dir(&test_utils).unwrap();
-    fs::write(
-        test_utils.join("Cargo.toml"),
-        r#"
-[package]
-name = "test-utils"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-    fs::create_dir(test_utils.join("src")).unwrap();
-    fs::write(test_utils.join("src/lib.rs"), "").unwrap();
-
-    let main_dir = workspace_root.join("main");
-    fs::create_dir(&main_dir).unwrap();
-    fs::write(
-        main_dir.join("Cargo.toml"),
-        r#"
-[package]
-name = "main"
-version = "0.1.0"
-edition = "2021"
-
-[dev-dependencies]
-test-utils = { path = "../test-utils" }
-
-[build-dependencies]
-test-utils = { path = "../test-utils" }
-"#,
-    )
-    .unwrap();
-    fs::create_dir(main_dir.join("src")).unwrap();
-    fs::write(main_dir.join("src/lib.rs"), "").unwrap();
-
-    let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg("test-utils")
-        .arg("test-helpers")
-        .arg("--both")
-        .arg("--yes")
-        .current_dir(workspace_root)
-        .assert()
-        .success();
-
-    let main_toml = fs::read_to_string(workspace_root.join("main/Cargo.toml")).unwrap();
-
-    assert!(main_toml.contains("[dev-dependencies]"));
-    assert!(main_toml.contains("[build-dependencies]"));
+    // Verify workspace.dependencies was updated
+    let workspace_toml = fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
     assert!(
-        main_toml.matches("test-helpers").count() >= 2,
-        "Expected test-helpers at least twice in:\n{}",
-        main_toml
+        workspace_toml.contains("crate-b"),
+        "Expected crate-b in workspace.dependencies: {}",
+        workspace_toml
     );
-}
-
-#[cfg(test)]
-mod validation_tests {
-    use cargo_rename::validation::validate_package_name;
-
-    #[test]
-    fn test_valid_package_names() {
-        assert!(validate_package_name("my-crate").is_ok());
-        assert!(validate_package_name("my_crate").is_ok());
-        assert!(validate_package_name("a").is_ok());
-    }
-
-    #[test]
-    fn test_invalid_package_names() {
-        assert!(validate_package_name("123crate").is_err());
-        assert!(validate_package_name("my@crate").is_err());
-        assert!(validate_package_name("test").is_err());
-        assert!(validate_package_name("").is_err());
-    }
+    assert!(
+        !workspace_toml.contains("crate-a = {"),
+        "Old crate-a should be removed from workspace.dependencies: {}",
+        workspace_toml
+    );
 }

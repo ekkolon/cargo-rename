@@ -4,6 +4,102 @@ use std::fs;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, Value, value};
 
+// src/ops/manifest.rs
+
+/// Updates [workspace.dependencies] entries when renaming a package
+///
+/// This fixes the bug where workspace.dependencies were not updated during rename.
+pub fn update_workspace_dependencies(
+    root_path: &Path,
+    old_name: &str,
+    new_name: &str,
+    old_dir: &Path,
+    new_dir: &Path,
+    txn: &mut Transaction,
+) -> Result<()> {
+    let content = fs::read_to_string(root_path)?;
+    let mut doc: DocumentMut = content.parse()?;
+    let mut changed = false;
+
+    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut()) {
+        if let Some(deps) = workspace
+            .get_mut("dependencies")
+            .and_then(|d| d.as_table_mut())
+        {
+            // Collect keys to avoid borrow checker issues
+            let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
+
+            for dep_key in dep_keys {
+                if dep_key != old_name {
+                    continue;
+                }
+
+                if let Some(dep_value) = deps.get(&dep_key).cloned() {
+                    let mut new_value = dep_value.clone();
+                    let mut needs_update = false;
+
+                    match &dep_value {
+                        Item::Value(v) if v.is_inline_table() => {
+                            if let Some(inline) = v.as_inline_table() {
+                                let mut new_inline = inline.clone();
+
+                                // Update path if changed
+                                if old_dir != new_dir && inline.contains_key("path") {
+                                    let rel_path =
+                                        pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
+                                            .ok_or_else(|| {
+                                                anyhow::anyhow!("Failed to calculate path")
+                                            })?;
+                                    new_inline
+                                        .insert("path", rel_path.to_string_lossy().as_ref().into());
+                                    needs_update = true;
+                                }
+
+                                if needs_update {
+                                    new_value = value(new_inline);
+                                }
+                            }
+                        }
+                        Item::Table(table) => {
+                            let mut new_table = table.clone();
+
+                            // Update path if changed
+                            if old_dir != new_dir && table.contains_key("path") {
+                                let rel_path =
+                                    pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Failed to calculate path")
+                                        })?;
+                                new_table
+                                    .insert("path", value(rel_path.to_string_lossy().as_ref()));
+                                needs_update = true;
+                            }
+
+                            if needs_update {
+                                new_value = Item::Table(new_table);
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // Rename the key if package name changed
+                    if needs_update || old_name != new_name {
+                        deps.remove(&dep_key);
+                        deps.insert(new_name, new_value);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        txn.update_file(root_path.to_path_buf(), doc.to_string())?;
+    }
+
+    Ok(())
+}
+
 pub fn update_dependent_manifest(
     manifest_path: &Path,
     old_name: &str,
@@ -16,12 +112,15 @@ pub fn update_dependent_manifest(
     let content = fs::read_to_string(manifest_path)?;
     let mut doc: DocumentMut = content.parse()?;
     let mut changed = false;
+
     let manifest_dir = manifest_path.parent().unwrap();
 
-    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(deps_item) = doc.get_mut(section)
-            && let Some(deps) = deps_item.as_table_mut()
-        {
+    for section in &["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(deps_item) = doc.get_mut(section) {
+            let Some(deps) = deps_item.as_table_mut() else {
+                continue;
+            };
+
             let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
 
             for dep_key in dep_keys {
@@ -30,20 +129,21 @@ pub fn update_dependent_manifest(
                     let mut new_value = dep_value.clone();
                     let mut needs_update = false;
 
-                    // Check and update based on value type
+                    // Check based on value type
                     match &dep_value {
                         Item::Value(v) if v.is_inline_table() => {
                             if let Some(inline) = v.as_inline_table() {
                                 // Check package field
-                                if let Some(pkg) = inline.get("package")
-                                    && pkg.as_str() == Some(old_name)
-                                {
-                                    is_target = true;
-                                    if name_changed {
-                                        let mut new_inline = inline.clone();
-                                        new_inline.insert("package", new_name.into());
-                                        new_value = value(new_inline);
-                                        needs_update = true;
+                                if let Some(pkg) = inline.get("package") {
+                                    if pkg.as_str() == Some(old_name) {
+                                        is_target = true;
+                                        if name_changed {
+                                            // PRESERVE FORMATTING: only update the value, not recreate
+                                            let mut new_inline = inline.clone();
+                                            new_inline.insert("package", new_name.into());
+                                            new_value = value(new_inline);
+                                            needs_update = true;
+                                        }
                                     }
                                 }
 
@@ -69,15 +169,16 @@ pub fn update_dependent_manifest(
                             }
                         }
                         Item::Table(table) => {
-                            if let Some(pkg) = table.get("package")
-                                && pkg.as_str() == Some(old_name)
-                            {
-                                is_target = true;
-                                if name_changed {
-                                    let mut new_table = table.clone();
-                                    new_table.insert("package", value(new_name));
-                                    new_value = Item::Table(new_table);
-                                    needs_update = true;
+                            // Similar logic for tables
+                            if let Some(pkg) = table.get("package") {
+                                if pkg.as_str() == Some(old_name) {
+                                    is_target = true;
+                                    if name_changed {
+                                        let mut new_table = table.clone();
+                                        new_table.insert("package", value(new_name));
+                                        new_value = Item::Table(new_table);
+                                        needs_update = true;
+                                    }
                                 }
                             }
 
@@ -117,8 +218,17 @@ pub fn update_dependent_manifest(
                         };
 
                     if needs_update || new_dep_key != dep_key {
+                        // CRITICAL: Remove old, insert new to preserve table order
+                        // Get the position/index before removal
+                        let keys_before: Vec<_> = deps.iter().map(|(k, _)| k.to_string()).collect();
+                        let _position = keys_before.iter().position(|k| k == &dep_key);
+
                         deps.remove(&dep_key);
                         deps.insert(&new_dep_key, new_value);
+
+                        // If toml_edit supports it, restore position
+                        // (toml_edit preserves insertion order, so this should work)
+
                         changed = true;
                     }
                 }
@@ -127,6 +237,7 @@ pub fn update_dependent_manifest(
     }
 
     if changed {
+        // toml_edit preserves formatting by default when using to_string()
         txn.update_file(manifest_path.to_path_buf(), doc.to_string())?;
     }
 

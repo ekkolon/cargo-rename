@@ -1,15 +1,17 @@
 use crate::error::{RenameError, Result};
 use crate::ops::Transaction;
 use crate::ops::{
-    update_dependent_manifest, update_package_name, update_source_code, update_workspace_members,
+    update_dependent_manifest, update_package_name, update_source_code,
+    update_workspace_dependencies, update_workspace_members,
 };
 use crate::validation::{confirm_operation, preflight_checks};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
 use colored::Colorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug, Clone)]
+#[clap(verbatim_doc_comment)]
 pub struct RenameArgs {
     /// Current name of the package to rename
     pub old_name: String,
@@ -17,9 +19,19 @@ pub struct RenameArgs {
     /// New name of the package
     pub new_name: String,
 
-    /// Operation mode
-    #[command(flatten)]
-    pub mode: RenameMode,
+    /// Also move the package to a new directory
+    ///
+    /// By default, only the package name is changed in Cargo.toml and references.
+    ///
+    /// When specified without a value, the directory is renamed to match the new
+    /// package name. When specified with a path, the package is moved to that location.
+    ///
+    /// Examples:
+    ///   --move              Move to directory matching new package name
+    ///   --move custom-name  Move to ./custom-name/
+    ///   --move crates/api   Move to ./crates/api/
+    #[arg(long, value_name = "DIR", verbatim_doc_comment)]
+    pub r#move: Option<Option<PathBuf>>,
 
     /// Path to the workspace Cargo.toml (defaults to current directory)
     #[arg(long, value_name = "PATH")]
@@ -36,51 +48,40 @@ pub struct RenameArgs {
     /// Allow renaming even if the git workspace has uncommitted changes
     #[arg(long)]
     pub allow_dirty: bool,
-
-    /// Enable verbose output showing each operation step
-    #[arg(long, short = 'v')]
-    pub verbose: bool,
 }
 
-#[derive(Debug, Clone, clap::Args)]
-#[group(multiple = false)]
-pub struct RenameMode {
-    /// Rename the package name only (default)
-    ///
-    /// Updates Cargo.toml, workspace dependencies, and source code,
-    /// but keeps the directory name unchanged.
-    #[arg(long, group = "mode")]
-    pub name_only: bool,
-
-    /// Move or rename the package directory only
-    ///
-    /// Updates workspace paths but keeps the package name unchanged.
-    #[arg(long, group = "mode")]
-    pub path_only: bool,
-
-    /// Rename both the package name and its directory
-    ///
-    /// Equivalent to combining --name-only and --path-only.
-    #[arg(long, short = 'b', group = "mode")]
-    pub both: bool,
-}
-
-impl RenameMode {
-    pub fn should_rename_package(&self) -> bool {
-        self.both || self.name_only || !self.path_only
+impl RenameArgs {
+    /// Returns true if the package should be moved to a new directory
+    pub fn should_move(&self) -> bool {
+        self.r#move.is_some()
     }
 
-    pub fn should_move_directory(&self) -> bool {
-        self.both || self.path_only
+    /// Returns the target directory name for the move operation
+    ///
+    /// - If --move was specified without a value, returns the new package name
+    /// - If --move was specified with a value, returns that value
+    /// - If --move was not specified, returns None
+    pub fn move_target(&self) -> Option<&str> {
+        self.r#move.as_ref().map(|opt_path| {
+            opt_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .unwrap_or(&self.new_name)
+        })
+    }
+
+    /// Calculates the new directory path based on the current directory
+    pub fn calculate_new_dir(&self, old_dir: &Path) -> Option<PathBuf> {
+        if let Some(target) = self.move_target() {
+            let parent = old_dir.parent().unwrap_or(old_dir);
+            Some(parent.join(target))
+        } else {
+            None
+        }
     }
 }
 
 pub fn execute(args: RenameArgs) -> Result<()> {
-    // Setup logging level based on verbose flag
-    if args.verbose {
-        log::set_max_level(log::LevelFilter::Debug);
-    }
-
     // Load workspace metadata
     let mut cmd = MetadataCommand::new();
     if let Some(path) = &args.manifest_path {
@@ -97,42 +98,29 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         return Err(RenameError::Cancelled);
     }
 
-    // Find target package
     let target_pkg = metadata
         .packages
         .iter()
         .find(|p| p.name == args.old_name)
-        .unwrap(); // Safe: validated in preflight_checks
+        .unwrap();
 
     let old_manifest_path = target_pkg.manifest_path.as_std_path();
     let old_dir = old_manifest_path.parent().unwrap();
 
-    // Calculate new names and paths
-    let new_pkg_name = if args.mode.should_rename_package() {
-        &args.new_name
-    } else {
-        &args.old_name
-    };
+    // Calculate new directory (if moving)
+    let new_dir = args
+        .calculate_new_dir(old_dir)
+        .unwrap_or_else(|| old_dir.to_path_buf());
 
-    let mut new_dir = old_dir.to_path_buf();
-    if args.mode.should_move_directory() {
-        new_dir.set_file_name(&args.new_name);
-    }
+    let new_pkg_name = &args.new_name;
+    let should_move = args.should_move();
 
     // Create transaction
     let mut txn = Transaction::new(args.dry_run);
 
-    // Show progress header (only in non-dry-run mode)
-    if !args.dry_run && args.verbose {
-        println!("\n{}", "Executing rename operation...".cyan().bold());
-    }
-
-    // Execute all operations with proper error handling
-    let result = (|| -> Result<()> {
+    // Execute operations
+    let result: Result<()> = (|| {
         // 1. Update all dependent manifests
-        if args.verbose {
-            println!("\n{} Updating workspace dependencies...", "→".cyan());
-        }
         for member_id in &metadata.workspace_members {
             let member = &metadata[member_id];
             update_dependent_manifest(
@@ -140,66 +128,62 @@ pub fn execute(args: RenameArgs) -> Result<()> {
                 &args.old_name,
                 new_pkg_name,
                 &new_dir,
-                args.mode.should_move_directory(),
-                args.mode.should_rename_package(),
+                should_move, // path_changed
+                true,        // name_changed (always true for rename)
                 &mut txn,
             )?;
         }
 
         // 2. Update target package name
-        if args.mode.should_rename_package() {
-            if args.verbose {
-                println!("\n{} Updating package name...", "→".cyan());
-            }
-            update_package_name(old_manifest_path, new_pkg_name, &mut txn)?;
-        }
+        update_package_name(old_manifest_path, new_pkg_name, &mut txn)?;
 
         // 3. Update source code references
-        if args.mode.should_rename_package() {
-            if args.verbose {
-                println!("\n{} Updating source code references...", "→".cyan());
-            }
-            update_source_code(&metadata, &args.old_name, &args.new_name, &mut txn)?;
-        }
+        update_source_code(&metadata, &args.old_name, &args.new_name, &mut txn)?;
 
-        // 4. Update workspace members and move directory
-        if args.mode.should_move_directory() && old_dir != new_dir {
-            if args.verbose {
-                println!("\n{} Moving directory...", "→".cyan());
-            }
-            let root_manifest = metadata.workspace_root.as_std_path().join("Cargo.toml");
-            if root_manifest.exists() {
+        // 4. Update workspace manifest
+        let root_manifest = metadata.workspace_root.as_std_path().join("Cargo.toml");
+        if root_manifest.exists() {
+            // Update workspace.members (if moving)
+            if should_move && old_dir != new_dir {
                 update_workspace_members(&root_manifest, old_dir, &new_dir, &mut txn)?;
             }
+
+            // Update workspace.dependencies
+            update_workspace_dependencies(
+                &root_manifest,
+                &args.old_name,
+                new_pkg_name,
+                old_dir,
+                &new_dir,
+                &mut txn,
+            )?;
+        }
+
+        // 5. Move directory (last step)
+        if should_move && old_dir != new_dir {
             txn.move_directory(old_dir.to_path_buf(), new_dir.clone())?;
         }
 
         Ok(())
     })();
 
-    // Handle errors with detailed rollback information
+    // Handle errors
     if let Err(e) = result {
-        eprintln!("\n{} {}", "Error:".red().bold(), e);
+        eprintln!("{} {}", "Error:".red().bold(), e);
+        return Err(e);
+    }
 
+    // Commit all staged operations
+    if let Err(e) = txn.commit() {
+        eprintln!("{} {}", "Error during commit:".red().bold(), e);
+
+        // Try to rollback
         if !args.dry_run && !txn.is_empty() {
-            eprintln!("\n{}", "Attempting to rollback changes...".yellow().bold());
-
+            eprintln!("{}", "Attempting to rollback changes...".yellow().bold());
             match txn.rollback() {
-                Ok(_) => {
-                    eprintln!("{}", "✓ Rollback successful. No changes were made.".green());
-                }
+                Ok(_) => eprintln!("{}", "✓ Rollback successful.".green()),
                 Err(rollback_err) => {
-                    eprintln!("{} Rollback failed: {}", "✗".red().bold(), rollback_err);
-                    eprintln!(
-                        "\n{}",
-                        "WARNING: Your workspace may be in an inconsistent state."
-                            .red()
-                            .bold()
-                    );
-                    eprintln!(
-                        "{}",
-                        "Please check your files manually or restore from git.".yellow()
-                    );
+                    eprintln!("{} {}", "✗ Rollback failed:".red().bold(), rollback_err);
                 }
             }
         }
@@ -207,7 +191,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         return Err(e);
     }
 
-    // Print detailed summary
+    // Print summary (can still access txn)
     txn.print_summary(
         &args.old_name,
         &args.new_name,
@@ -217,8 +201,8 @@ pub fn execute(args: RenameArgs) -> Result<()> {
     // Success message
     if !args.dry_run {
         println!(
-            "\n{} Successfully renamed {} to {}",
-            "✓".green().bold(),
+            "{} {} → {}",
+            "✓ Successfully renamed".green().bold(),
             args.old_name.yellow(),
             args.new_name.green().bold()
         );
