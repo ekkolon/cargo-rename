@@ -16,7 +16,7 @@ use std::io::{self, Write};
 ///
 /// Returns `true` if confirmed or skipped, `false` if declined.
 pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool> {
-    if args.yes || args.dry_run {
+    if args.skip_confirmation || args.dry_run {
         return Ok(true);
     }
 

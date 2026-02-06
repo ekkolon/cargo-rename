@@ -49,7 +49,7 @@
 //!     outdir: Some(Some(PathBuf::from("libs/new-crate"))),
 //!     manifest_path: None,
 //!     dry_run: false,
-//!     yes: true,
+//!     skip_confirmation: true,
 //!     allow_dirty: false,
 //! };
 //!

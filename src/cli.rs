@@ -14,7 +14,7 @@ pub struct CargoCli {
     #[command(subcommand)]
     pub command: CargoCommand,
 
-    /// Control color output: auto, always, never
+    /// Control color output
     #[arg(
         long,
         value_name = "WHEN",
@@ -48,22 +48,19 @@ pub struct CargoCli {
 
 #[derive(Subcommand)]
 pub enum CargoCommand {
-    #[clap(
-        verbatim_doc_comment,
-        about = "Rename a Cargo package and update all workspace references",
-        long_about = "Safely rename a Cargo package and update all workspace references.
-
-This command performs a transactional rename and automatically updates:
-  • Package name in Cargo.toml
-  • All workspace dependency declarations (including workspace.dependencies)
-  • Rust source code references (use paths, qualified paths, doc links)
-  • Workspace member paths (if --move)
-  • Package directory (if --move)
-
-If any step fails, all changes are rolled back automatically.
-
-By default, only the package name is renamed. Use --move to relocate the directory.
-No files are modified until you confirm the operation."
-    )]
+    /// Perform a coordinated, all-or-nothing rename of a Cargo package
+    ///
+    /// This command performs a transactional rename and automatically updates:
+    ///   • Package name in Cargo.toml
+    ///   • All workspace dependency declarations (including workspace.dependencies)
+    ///   • Rust source code references (use paths, qualified paths, doc links)
+    ///   • Workspace member paths (if --move)
+    ///   • Package directory (if --move)
+    ///
+    /// If any step fails, all changes are rolled back automatically.
+    ///
+    /// By default, only the package name is renamed. Use --move to relocate the directory.
+    /// No files are modified until you confirm the operation."
+    #[clap(verbatim_doc_comment)]
     Rename(crate::steps::rename::RenameArgs),
 }

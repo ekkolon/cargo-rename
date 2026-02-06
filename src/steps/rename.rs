@@ -40,8 +40,8 @@ pub struct RenameArgs {
     pub dry_run: bool,
 
     /// Skip interactive confirmation
-    #[arg(long, short = 'y')]
-    pub yes: bool,
+    #[arg(long = "yes", short = 'y')]
+    pub skip_confirmation: bool,
 
     /// Allow operation with uncommitted git changes
     #[arg(long)]
@@ -436,7 +436,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -451,7 +451,7 @@ mod tests {
             outdir: Some(None), // --move without DIR
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -466,7 +466,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -481,7 +481,7 @@ mod tests {
             outdir: Some(Some(PathBuf::from("new-location"))),
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -496,7 +496,7 @@ mod tests {
             outdir: Some(Some(PathBuf::from("new-location"))),
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -511,7 +511,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -526,7 +526,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -550,7 +550,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -568,7 +568,7 @@ mod tests {
             outdir: Some(None), // --move without argument
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -589,7 +589,7 @@ mod tests {
             outdir: Some(None),
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -611,7 +611,7 @@ mod tests {
             outdir: Some(Some(PathBuf::from("libs/api"))),
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -632,7 +632,7 @@ mod tests {
             outdir: Some(None),
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -653,7 +653,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -671,7 +671,7 @@ mod tests {
             outdir: Some(Some(PathBuf::from("libs/my-crate"))),
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
@@ -689,7 +689,7 @@ mod tests {
             outdir: None,
             manifest_path: None,
             dry_run: false,
-            yes: false,
+            skip_confirmation: false,
             allow_dirty: false,
         };
 
