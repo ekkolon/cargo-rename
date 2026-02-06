@@ -4,15 +4,16 @@
 
 use crate::error::Result;
 use crate::steps::rename::RenameArgs;
+
 use cargo_metadata::Metadata;
 use colored::Colorize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 /// Prompts user for confirmation before executing rename.
 ///
 /// ## Automatic Skip
 /// - `--yes` or `--dry-run` flag set
-/// - Non-interactive terminal (Unix only)
+/// - Non-interactive terminal
 ///
 /// Returns `true` if confirmed or skipped, `false` if declined.
 pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool> {
@@ -20,13 +21,9 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
         return Ok(true);
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        if unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 0 } {
-            log::warn!("Non-interactive terminal detected. Use --yes to confirm automatically.");
-            return Ok(false);
-        }
+    if !io::stdin().is_terminal() {
+        log::warn!("Non-interactive terminal detected. Use --yes to confirm automatically.");
+        return Ok(false);
     }
 
     let pkg = metadata
