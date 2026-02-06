@@ -15,19 +15,21 @@ name = "cargo-rename"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
 cargo_metadata = "0.23"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
-colored = "3.1"
-log = "0.4"
+clap-cargo = "0.18.3"
+
+syn = { version = "2", features = ["full"] }
+ignore = "0.4"
 pathdiff = "0.2"
 regex = "1.12"
-thiserror = "2.0"
 toml_edit = "0.23.9"
-syn = { version = "2", features = ["full", "visit-mut"] }
-ignore = "0.4"
-clap-cargo = "0.18.3"
+
+anyhow = "1"
+thiserror = "2.0"
 env_logger = "0.11.8"
+log = "0.4"
+colored = "3.1"
 
 [dev-dependencies]
 assert_cmd = "2.1"

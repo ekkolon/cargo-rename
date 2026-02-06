@@ -1,43 +1,103 @@
+//! Atomic file system operations with automatic rollback.
+//!
+//! This module provides a transaction system for coordinating multiple file operations
+//! (updates and directory moves) that must succeed or fail as a unit.
+//!
+//! # Execution Guarantees
+//!
+//! - **Atomicity**: Either all operations succeed, or all are rolled back
+//! - **Ordering**: File updates execute before directory moves to prevent path resolution issues
+//! - **Validation**: Pre-flight checks run before any mutations occur
+//! - **Idempotency**: Files with unchanged content are automatically skipped
+//!
+//! # Execution Phases
+//!
+//! 1. **Building**: Operations are staged via `update_file()` and `move_directory()`
+//! 2. **Validation**: `commit()` validates all operations can succeed (paths exist, writeable, no conflicts)
+//! 3. **Execution**: Operations execute in dependency order:
+//!    - File updates (while still at original paths)
+//!    - Directory moves (after all files updated)
+//! 4. **Rollback** (on failure): Executed operations are reversed in LIFO order
+//!
+//! # Example
+//!
+//! ```no_run
+//! use cargo_rename::fs::Transaction;
+//! # use std::path::PathBuf;
+//! # fn example() -> cargo_rename::error::Result<()> {
+//! let mut txn = Transaction::new(false);
+//!
+//! // Stage operations
+//! txn.update_file(PathBuf::from("Cargo.toml"), "[package]\nname = \"new\"".into())?;
+//! txn.move_directory(PathBuf::from("old-crate"), PathBuf::from("new-crate"))?;
+//!
+//! // Commit atomically (or rollback on error)
+//! txn.commit()?;
+//! # Ok(())
+//! # }
+//! ```
+
 use crate::error::{RenameError, Result};
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A file system operation that can be committed or rolled back.
 #[derive(Debug, Clone)]
 pub enum Operation {
+    /// Update a file's contents.
+    ///
+    /// Stores both original and new content to enable rollback.
     UpdateFile {
         path: PathBuf,
         original: String,
         new: String,
     },
-    MoveDirectory {
-        from: PathBuf,
-        to: PathBuf,
-    },
+    /// Move a directory to a new location.
+    ///
+    /// Handles both same-filesystem (atomic rename) and cross-filesystem (copy+delete) moves.
+    MoveDirectory { from: PathBuf, to: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionState {
+    /// Operations are being staged, not yet committed.
     Building,
+    /// All operations executed successfully.
     Committed,
+    /// Operations were manually rolled back after commit.
     RolledBack,
+    /// Commit validation failed; no operations executed.
     Failed,
 }
 
+/// A transaction coordinating multiple file system operations.
+///
+/// Must be explicitly committed via `commit()`. If dropped without committing,
+/// a warning is logged but no rollback occurs (since operations weren't applied).
+///
+/// # Dry-Run Mode
+///
+/// When `dry_run = true`, operations are staged and validated but never executed.
+/// Useful for previewing changes.
 #[must_use = "Transaction must be committed or rolled back"]
 pub struct Transaction {
     operations: Vec<Operation>,
     dry_run: bool,
     state: TransactionState,
-    /// Tracks which operations were successfully executed (for partial rollback)
-    /// Stores indices in execution order
-    executed_indices: Vec<usize>, // Changed from HashSet to Vec
-    /// Internal map of path redirects due to directory moves
+    /// Tracks indices of operations that executed successfully (for partial rollback).
+    executed_indices: Vec<usize>,
+    /// Maps old directory paths to new paths (not used during staging; reserved for future features).
     path_redirects: HashMap<PathBuf, PathBuf>,
 }
 
 impl Transaction {
+    /// Creates a new transaction.
+    ///
+    /// # Arguments
+    ///
+    /// - `dry_run`: If true, operations are validated but not executed
     pub fn new(dry_run: bool) -> Self {
         Self {
             operations: Vec::new(),
@@ -48,9 +108,18 @@ impl Transaction {
         }
     }
 
-    /// Pre-flight validation: check if all operations can succeed
+    /// Validates all staged operations can succeed.
+    ///
+    /// Checks performed:
+    /// - No duplicate file operations
+    /// - All source paths exist
+    /// - Files are writable (not read-only)
+    /// - Target directories don't already exist
+    ///
+    /// # Errors
+    ///
+    /// Returns the first validation error encountered. Does not modify file system.
     fn validate(&self) -> Result<()> {
-        // Check for conflicts
         let mut file_paths = HashSet::new();
         let mut dir_moves = HashMap::new();
 
@@ -64,7 +133,6 @@ impl Transaction {
                         )));
                     }
 
-                    // Check file still exists and is writable
                     if !path.exists() {
                         return Err(RenameError::Io(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -72,14 +140,13 @@ impl Transaction {
                         )));
                     }
 
-                    // Check we can write (permissions)
-                    if let Ok(metadata) = fs::metadata(path) {
-                        if metadata.permissions().readonly() {
-                            return Err(RenameError::Io(std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                format!("File is read-only: {}", path.display()),
-                            )));
-                        }
+                    if let Ok(metadata) = fs::metadata(path)
+                        && metadata.permissions().readonly()
+                    {
+                        return Err(RenameError::Io(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!("File is read-only: {}", path.display()),
+                        )));
                     }
                 }
                 Operation::MoveDirectory { from, to } => {
@@ -99,7 +166,7 @@ impl Transaction {
             }
         }
 
-        // Check file operations don't conflict with directory moves
+        // Log (but don't error on) files inside directories being moved
         for file_path in &file_paths {
             for (from, to) in &dir_moves {
                 if file_path.starts_with(from) {
@@ -124,11 +191,12 @@ impl Transaction {
         self.operations.is_empty()
     }
 
+    /// Returns true if transaction has been successfully committed.
     pub fn is_committed(&self) -> bool {
         self.state == TransactionState::Committed
     }
 
-    /// Returns a preview of what will be changed
+    /// Returns a human-readable preview of staged operations.
     pub fn preview(&self) -> Vec<String> {
         self.operations
             .iter()
@@ -143,25 +211,33 @@ impl Transaction {
             .collect()
     }
 
-    /// Prints a detailed summary of all operations that were/will be performed
-    pub fn print_summary(&self, old_name: &str, new_name: &str, workspace_root: &std::path::Path) {
+    /// Prints a categorized summary of operations to stdout.
+    ///
+    /// Groups operations into:
+    /// - Package manifests (renamed package's Cargo.toml)
+    /// - Dependencies (other Cargo.toml files)
+    /// - Source code (.rs files)
+    /// - Documentation (.md, .txt files)
+    /// - Directory moves
+    ///
+    /// Paths are displayed relative to `workspace_root` with forward slashes.
+    pub fn print_summary(&self, old_name: &str, new_name: &str, workspace_root: &Path) {
         if self.operations.is_empty() {
             println!("\n{}", "No changes needed".yellow());
             return;
         }
 
-        // Helper to make paths relative and use forward slashes
-        let display_path = |path: &std::path::Path| -> String {
+        let display_path = |path: &Path| -> String {
             let relative =
                 pathdiff::diff_paths(path, workspace_root).unwrap_or_else(|| path.to_path_buf());
             relative.to_string_lossy().replace('\\', "/")
         };
 
-        // Categorize operations and deduplicate
-        let mut package_manifests = std::collections::HashSet::new();
-        let mut workspace_manifests = std::collections::HashSet::new();
-        let mut source_files = std::collections::HashSet::new();
-        let mut doc_files = std::collections::HashSet::new();
+        // Categorize operations
+        let mut package_manifests = HashSet::new();
+        let mut workspace_manifests = HashSet::new();
+        let mut source_files = HashSet::new();
+        let mut doc_files = HashSet::new();
         let mut dir_moves = Vec::new();
 
         for op in &self.operations {
@@ -171,7 +247,7 @@ impl Transaction {
                     let display = display_path(path);
 
                     if file_name == "Cargo.toml" {
-                        // Check if it's the package being renamed
+                        // Determine if this is the renamed package's manifest
                         if path
                             .parent()
                             .and_then(|p| p.file_name())
@@ -201,7 +277,7 @@ impl Transaction {
             }
         }
 
-        // Convert HashSets to sorted Vecs for consistent output
+        // Convert to sorted vecs
         let mut package_manifests: Vec<_> = package_manifests.into_iter().collect();
         let mut workspace_manifests: Vec<_> = workspace_manifests.into_iter().collect();
         let mut source_files: Vec<_> = source_files.into_iter().collect();
@@ -214,7 +290,7 @@ impl Transaction {
 
         // Print header
         if self.dry_run {
-            println!("{}", "DRY RUN - No changes will be made".yellow().bold());
+            println!("\n{}", "DRY RUN - No changes will be made".yellow().bold());
         } else {
             println!("\n{}", "Changes applied:".green().bold());
         }
@@ -232,11 +308,9 @@ impl Transaction {
         }
 
         // Directory moves
-        // In print_summary, update the directory moves section:
         if !dir_moves.is_empty() {
-            println!("📁 Directory");
+            println!("\n{} Directory", "📁".bold());
             for (from, to) in dir_moves {
-                // Show relative paths from workspace root
                 let from_rel = pathdiff::diff_paths(from, workspace_root)
                     .unwrap_or_else(|| from.to_path_buf());
                 let to_rel =
@@ -248,10 +322,9 @@ impl Transaction {
                 if self.dry_run {
                     println!("   {} → {}", from_display.yellow(), to_display.green());
                 } else {
-                    println!("   ✓ {} → {}", from_display, to_display.green());
+                    println!("   {} → {}", from_display, to_display.green());
                 }
             }
-            println!();
         }
 
         // Workspace manifests (dependencies)
@@ -343,7 +416,6 @@ impl Transaction {
         }
 
         // Summary footer
-        // Summary footer
         println!();
         let num_ops = self.operations.len();
         if self.dry_run {
@@ -363,7 +435,6 @@ impl Transaction {
     }
 }
 
-// Auto-rollback if not committed
 impl Drop for Transaction {
     fn drop(&mut self) {
         if self.state == TransactionState::Building && !self.operations.is_empty() && !self.dry_run
@@ -374,6 +445,21 @@ impl Drop for Transaction {
 }
 
 impl Transaction {
+    /// Stages a directory move operation.
+    ///
+    /// The move is not executed until `commit()` is called. Directory moves
+    /// execute after all file updates to prevent path resolution issues.
+    ///
+    /// # Arguments
+    ///
+    /// - `from`: Source directory (must exist)
+    /// - `to`: Destination directory (must not exist)
+    ///
+    /// # Errors
+    ///
+    /// - `DirectoryExists`: Target path already exists
+    /// - `Io(NotFound)`: Source directory doesn't exist
+    /// - `Other`: Transaction already committed/rolled back
     pub fn move_directory(&mut self, from: PathBuf, to: PathBuf) -> Result<()> {
         if self.state != TransactionState::Building {
             return Err(RenameError::Other(anyhow::anyhow!(
@@ -396,13 +482,25 @@ impl Transaction {
             log::info!("Would move: {} → {}", from.display(), to.display());
         }
 
-        // Track this redirect for file operations
         self.path_redirects.insert(from.clone(), to.clone());
-
         self.operations.push(Operation::MoveDirectory { from, to });
         Ok(())
     }
 
+    /// Stages a file update operation.
+    ///
+    /// Reads the current file content and compares it to `new_content`. If identical,
+    /// the operation is skipped (idempotent). Otherwise, the update is staged for commit.
+    ///
+    /// # Arguments
+    ///
+    /// - `path`: File to update (must exist and be readable)
+    /// - `new_content`: New file content
+    ///
+    /// # Errors
+    ///
+    /// - `Io`: File doesn't exist or isn't readable
+    /// - `Other`: Transaction already committed/rolled back
     pub fn update_file(&mut self, path: PathBuf, new_content: String) -> Result<()> {
         if self.state != TransactionState::Building {
             return Err(RenameError::Other(anyhow::anyhow!(
@@ -412,8 +510,6 @@ impl Transaction {
 
         log::debug!("Transaction::update_file called for: {}", path.display());
 
-        // DON'T apply path redirects during staging - files are still at old locations!
-        // Path redirects are only for tracking; actual moves happen during commit
         let original = fs::read_to_string(&path).map_err(|e| {
             log::error!("Failed to read file {}: {}", path.display(), e);
             RenameError::Io(std::io::Error::new(
@@ -434,7 +530,7 @@ impl Transaction {
         }
 
         self.operations.push(Operation::UpdateFile {
-            path, // Store the ORIGINAL path
+            path,
             original,
             new: new_content,
         });
@@ -443,6 +539,19 @@ impl Transaction {
         Ok(())
     }
 
+    /// Commits all staged operations atomically.
+    ///
+    /// Execution order:
+    /// 1. Validate all operations can succeed
+    /// 2. Execute all file updates (while files are at original paths)
+    /// 3. Execute all directory moves (after files updated)
+    ///
+    /// If any operation fails, executed operations are rolled back automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered during validation or execution.
+    /// On execution failure, rollback is attempted automatically.
     pub fn commit(&mut self) -> Result<()> {
         if self.state != TransactionState::Building {
             return Err(RenameError::Other(anyhow::anyhow!(
@@ -461,10 +570,7 @@ impl Transaction {
             return Err(e);
         }
 
-        // Phase 2: Execute in the correct order:
-        // 2a. First, update all files (at their OLD locations)
-        // 2b. Then, move directories
-
+        // Phase 2: Separate file ops from directory ops
         let mut file_ops = Vec::new();
         let mut dir_ops = Vec::new();
 
@@ -475,7 +581,7 @@ impl Transaction {
             }
         }
 
-        // Execute file updates FIRST (while files are still at old paths)
+        // Phase 3: Execute file updates FIRST (while files still at old paths)
         for &idx in &file_ops {
             if let Some(Operation::UpdateFile { path, new, .. }) = self.operations.get(idx) {
                 fs::write(path, new).map_err(|e| {
@@ -489,17 +595,14 @@ impl Transaction {
             }
         }
 
-        // Execute directory moves SECOND (after all files are updated)
+        // Phase 4: Execute directory moves SECOND (after all files updated)
         for &idx in &dir_ops {
             if let Some(Operation::MoveDirectory { from, to }) = self.operations.get(idx) {
-                // Create parent directories if needed
                 if let Some(parent) = to.parent() {
                     fs::create_dir_all(parent)?;
                 }
 
-                // Check if cross-filesystem move is needed
                 if Self::is_same_filesystem(from, to)? {
-                    // Atomic rename
                     fs::rename(from, to).map_err(|e| {
                         RenameError::Io(std::io::Error::new(
                             e.kind(),
@@ -512,7 +615,6 @@ impl Transaction {
                         ))
                     })?;
                 } else {
-                    // Cross-filesystem: must copy then delete
                     Self::copy_dir_recursive(from, to)?;
                     fs::remove_dir_all(from)?;
                 }
@@ -526,39 +628,36 @@ impl Transaction {
         Ok(())
     }
 
-    /// Manually rollback a committed transaction
+    /// Manually rolls back a committed transaction.
+    ///
+    /// Reverses all executed operations in LIFO order. Only works on committed
+    /// transactions (not building or failed ones).
+    ///
+    /// # Errors
+    ///
+    /// - `RollbackFailed`: One or more operations couldn't be reversed
+    /// - `Other`: Transaction not in a rollback-able state
     pub fn rollback(&mut self) -> Result<()> {
         match self.state {
-            TransactionState::Building => {
-                // Nothing to rollback
-                Ok(())
-            }
-            TransactionState::Committed if self.dry_run => {
-                // Dry run, nothing to rollback
-                Ok(())
-            }
+            TransactionState::Building => Ok(()),
+            TransactionState::Committed if self.dry_run => Ok(()),
             TransactionState::Committed => {
-                // Rollback all operations - populate executed_indices
                 self.executed_indices = (0..self.operations.len()).collect();
                 self.rollback_partial()
             }
-            TransactionState::Failed => {
-                // Already attempted rollback during commit
-                Err(RenameError::Other(anyhow::anyhow!(
-                    "Transaction failed; rollback already attempted"
-                )))
-            }
+            TransactionState::Failed => Err(RenameError::Other(anyhow::anyhow!(
+                "Transaction failed; rollback already attempted"
+            ))),
             TransactionState::RolledBack => Err(RenameError::Other(anyhow::anyhow!(
                 "Transaction already rolled back"
             ))),
         }
     }
 
-    /// Rollback only the operations that were executed
+    /// Rolls back only the operations that were successfully executed.
     fn rollback_partial(&mut self) -> Result<()> {
         let mut errors = Vec::new();
 
-        // Rollback in reverse order - now this works!
         for &idx in self.executed_indices.iter().rev() {
             if let Some(op) = self.operations.get(idx) {
                 let result = match op {
@@ -566,7 +665,6 @@ impl Transaction {
                         .map_err(|e| format!("Failed to restore {}: {}", path.display(), e)),
                     Operation::MoveDirectory { from, to } => {
                         if to.exists() {
-                            // Try to move back
                             if Self::is_same_filesystem(to, from).unwrap_or(true) {
                                 fs::rename(to, from).map_err(|e| {
                                     format!("Failed to move back {}: {}", to.display(), e)
@@ -583,7 +681,7 @@ impl Transaction {
                                     })
                             }
                         } else {
-                            Ok(()) // Directory doesn't exist, nothing to rollback
+                            Ok(())
                         }
                     }
                 };
@@ -603,7 +701,10 @@ impl Transaction {
         }
     }
 
-    /// Check if two paths are on the same filesystem
+    /// Checks if two paths are on the same filesystem.
+    ///
+    /// Used to determine if an atomic `rename()` is possible, or if a cross-filesystem
+    /// copy+delete is required.
     fn is_same_filesystem(path1: &Path, path2: &Path) -> Result<bool> {
         #[cfg(unix)]
         {
@@ -616,19 +717,18 @@ impl Transaction {
 
         #[cfg(not(unix))]
         {
-            // On Windows, assume same filesystem if same drive letter
             let path1_str = path1.to_string_lossy();
             let path2_str = path2.to_string_lossy();
 
             if path1_str.len() >= 2 && path2_str.len() >= 2 {
                 Ok(path1_str.chars().next() == path2_str.chars().next())
             } else {
-                Ok(true) // Assume same filesystem if can't determine
+                Ok(true)
             }
         }
     }
 
-    /// Recursively copy directory
+    /// Recursively copies a directory tree.
     fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
 
@@ -649,6 +749,7 @@ impl Transaction {
     }
 }
 
+/// Statistics about operations in a transaction.
 #[derive(Debug, Clone, Copy)]
 pub struct TransactionStats {
     pub files_updated: usize,
@@ -657,6 +758,7 @@ pub struct TransactionStats {
 }
 
 impl Transaction {
+    /// Returns statistics about staged operations.
     pub fn stats(&self) -> TransactionStats {
         let mut files_updated = 0;
         let mut dirs_moved = 0;
@@ -675,8 +777,6 @@ impl Transaction {
         }
     }
 }
-
-// src/ops/transaction.rs (add at the end of the file)
 
 #[cfg(test)]
 mod tests {
@@ -1062,6 +1162,35 @@ mod tests {
         assert!(!txn.is_empty());
     }
 
+    #[cfg(unix)]
+    fn make_writable(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(path)?;
+        let mut perms = metadata.permissions();
+
+        // On Unix: Add write permission for owner only (0o200)
+        // This preserves other permission bits
+        let mode = perms.mode();
+        perms.set_mode(mode | 0o200); // Owner write permission
+
+        fs::set_permissions(path, perms)?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn make_writable(path: &Path) -> std::io::Result<()> {
+        let metadata = fs::metadata(path)?;
+        let mut perms = metadata.permissions();
+
+        // On Windows: set_readonly(false) is appropriate
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+
+        fs::set_permissions(path, perms)?;
+        Ok(())
+    }
+
     #[test]
     fn test_commit_failure_partial_rollback() {
         let temp = TempDir::new().unwrap();
@@ -1076,39 +1205,13 @@ mod tests {
         txn.update_file(file2.clone(), "new2".to_string()).unwrap();
 
         // Make file2 readonly after staging but before commit
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&file2).unwrap().permissions();
-            perms.set_mode(0o444);
-            fs::set_permissions(&file2, perms).unwrap();
-        }
-
-        #[cfg(windows)]
-        {
-            let mut perms = fs::metadata(&file2).unwrap().permissions();
-            perms.set_readonly(true);
-            fs::set_permissions(&file2, perms).unwrap();
-        }
+        make_writable(&file2).expect("failed to set file permissions");
 
         // Commit might fail on readonly file
         let result = txn.commit();
 
         // Clean up permissions for temp dir cleanup
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&file2).unwrap().permissions();
-            perms.set_mode(0o644);
-            let _ = fs::set_permissions(&file2, perms);
-        }
-
-        #[cfg(windows)]
-        {
-            let mut perms = fs::metadata(&file2).unwrap().permissions();
-            perms.set_readonly(false);
-            let _ = fs::set_permissions(&file2, perms);
-        }
+        make_writable(&file2).expect("failed to reset file permissions");
 
         // Should handle error gracefully
         if result.is_err() {

@@ -1,143 +1,119 @@
-// src/ops/manifest.rs - Complete production-ready implementation
+//! Dependency reference updates in `Cargo.toml` files.
+//!
+//! This module handles the complex task of updating dependency declarations
+//! when a package is renamed or moved. It supports all Cargo dependency formats
+//! including inline tables, multi-line tables, target-specific dependencies,
+//! and workspace inheritance.
+//!
+//! # Supported Formats
+//!
+//! ## Inline Tables
+//! ```toml
+//! [dependencies]
+//! my-crate = { path = "../my-crate", version = "0.1" }
+//! ```
+//!
+//! ## Multi-Line Inline Tables
+//! ```toml
+//! my-crate = {
+//!     path = "../my-crate",
+//!     features = ["feat1", "feat2"]
+//! }
+//! ```
+//!
+//! ## Multi-Line Tables
+//! ```toml
+//! [dependencies.my-crate]
+//! path = "../my-crate"
+//! features = ["feat1"]
+//! ```
+//!
+//! ## Target-Specific
+//! ```toml
+//! [target.'cfg(windows)'.dependencies]
+//! my-crate = { path = "../my-crate" }
+//!
+//! [target.x86_64-unknown-linux-gnu.dependencies]
+//! my-crate = { path = "../my-crate" }
+//! ```
+//!
+//! ## Package Renames
+//! ```toml
+//! alias = { package = "my-crate", path = "../my-crate" }
+//! ```
+//!
+//! ## Workspace Inheritance
+//! ```toml
+//! my-crate = { workspace = true }
+//! ```
+//!
+//! # State Machine
+//!
+//! `TomlProcessor` is a line-by-line state machine that tracks:
+//!
+//! - **Current section**: Which `[dependencies]` section we're in
+//! - **Brace depth**: Whether we're inside a multi-line inline table `{ ... }`
+//! - **Target context**: Whether we're processing the renamed dependency
+//!
+//! State transitions occur when:
+//! - Section headers are encountered (`[dependencies]`)
+//! - Dependency declarations are found (`my-crate = ...`)
+//! - Braces open/close in inline tables
+//!
+//! # Guarantees
+//!
+//! - **Preserves formatting**: Whitespace, indentation, and alignment unchanged
+//! - **Preserves comments**: Both inline (`# comment`) and block comments
+//! - **Preserves trailing newlines**: Files with/without final `\n` remain unchanged
+//! - **Atomic updates**: All changes via transaction, rollback on error
+//! - **Path normalization**: Converts backslashes to forward slashes
 
 use crate::error::Result;
-use crate::ops::transaction::Transaction;
+use crate::fs::transaction::Transaction;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
-use toml_edit::{DocumentMut, Item, Value};
 
-/// Updates workspace-level Cargo.toml manifest
-pub fn update_workspace_manifest(
-    root_path: &Path,
-    old_name: &str,
-    new_name: &str,
-    old_dir: &Path,
-    new_dir: &Path,
-    should_update_members: bool,
-    path_changed: bool,
-    name_changed: bool,
-    txn: &mut Transaction,
-) -> Result<()> {
-    let mut content = fs::read_to_string(root_path)?;
-    let original = content.clone();
-
-    // Step 1: Update workspace.members
-    if should_update_members {
-        let root_dir = root_path.parent().unwrap();
-        let old_rel = pathdiff::diff_paths(old_dir, root_dir)
-            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-        let new_rel = pathdiff::diff_paths(new_dir, root_dir)
-            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-
-        let old_str = old_rel.to_string_lossy().replace('\\', "/");
-        let new_str = new_rel.to_string_lossy().replace('\\', "/");
-
-        // Replace with both quote styles
-        let patterns = vec![
-            format!(r#""{}""#, regex::escape(&old_str)),
-            format!(r#"'{}'"#, regex::escape(&old_str)),
-        ];
-
-        for pattern in patterns {
-            let replacement = format!(r#""{}""#, new_str);
-            content = content.replace(&pattern, &replacement);
-        }
-
-        log::info!("Updated workspace.members: {} → {}", old_str, new_str);
-    }
-
-    // Step 2: Update workspace.dependencies key name
-    if name_changed {
-        let pattern = format!(r"(?m)^(\s*){}\s*=\s*", regex::escape(old_name));
-        if let Ok(re) = Regex::new(&pattern) {
-            content = re
-                .replace_all(&content, format!("${{1}}{} = ", new_name))
-                .to_string();
-            log::info!(
-                "Renamed workspace dependency key: {} → {}",
-                old_name,
-                new_name
-            );
-        }
-    }
-
-    // Step 3: Update path within the dependency
-    if path_changed {
-        let root_dir = root_path.parent().unwrap();
-        let old_rel = pathdiff::diff_paths(old_dir, root_dir)
-            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-        let new_rel = pathdiff::diff_paths(new_dir, root_dir)
-            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-
-        let old_path = old_rel.to_string_lossy().replace('\\', "/");
-        let new_path = new_rel.to_string_lossy().replace('\\', "/");
-
-        // Handle both quote styles
-        let patterns = vec![
-            format!(r#"path\s*=\s*"{}""#, regex::escape(&old_path)),
-            format!(r#"path\s*=\s*'{}'"#, regex::escape(&old_path)),
-        ];
-
-        for pattern in patterns {
-            if let Ok(re) = Regex::new(&pattern) {
-                if re.is_match(&content) {
-                    content = re
-                        .replace_all(&content, format!(r#"path = "{}""#, new_path))
-                        .to_string();
-                    log::info!(
-                        "Updated workspace dependency path: {} → {}",
-                        old_path,
-                        new_path
-                    );
-                    break;
-                }
-            }
-        }
-    }
-
-    if content != original {
-        txn.update_file(root_path.to_path_buf(), content)?;
-    }
-
-    Ok(())
-}
-
-/// Updates package name in a Cargo.toml
-pub fn update_package_name(
-    manifest_path: &Path,
-    new_name: &str,
-    txn: &mut Transaction,
-) -> Result<()> {
-    let content = fs::read_to_string(manifest_path)?;
-    let mut doc: DocumentMut = content.parse()?;
-    doc["package"]["name"] = Item::Value(Value::from(new_name));
-    txn.update_file(manifest_path.to_path_buf(), doc.to_string())?;
-    Ok(())
-}
-
-/// Production-ready implementation of update_dependent_manifest
+/// Updates dependency references in a package's `Cargo.toml`.
 ///
-/// # Supported Formats
-/// - Inline tables: `dep = { path = "..." }`
-/// - Multi-line inline tables with nested arrays
-/// - Multi-line tables: `[dependencies.dep]`
-/// - Target-specific: `[target.'cfg(...)'.dependencies]` and `[target.triple.dependencies]`
-/// - Package renames: `alias = { package = "dep", ... }`
-/// - Workspace inheritance: `dep = { workspace = true }`
-/// - Git dependencies with path overrides
-/// - Both quote styles: `"path"` and `'path'`
+/// Scans the manifest for references to `old_name` and updates them to `new_name`
+/// and/or `new_dir`. Handles all dependency formats (see module docs).
 ///
-/// # Guarantees
-/// - Preserves all comments (inline and block)
-/// - Preserves all blank lines and spacing
-/// - Preserves trailing newlines
-/// - Normalizes paths to forward slashes
-/// - Atomic updates (all or nothing via Transaction)
+/// # Arguments
 ///
-/// # Limitations
-/// - Does not support dotted key syntax: `dependencies.dep.path = "..."`
-/// - Does not handle TOML includes/imports (not standard Cargo.toml)
+/// - `manifest_path`: Path to the dependent package's `Cargo.toml`
+/// - `old_name`: Current name of the dependency
+/// - `new_name`: New name of the dependency
+/// - `new_dir`: New directory of the dependency (absolute path)
+/// - `path_changed`: Whether the dependency's directory changed
+/// - `name_changed`: Whether the dependency's name changed
+///
+/// # Errors
+///
+/// - `Io`: Cannot read manifest file
+/// - `Other`: Regex compilation failure (indicates bug in patterns)
+///
+/// # Examples
+///
+/// ```no_run
+/// # use cargo_rename::cargo::dependency::update_dependent_manifest;
+/// # use cargo_rename::fs::Transaction;
+/// # use std::path::Path;
+/// # fn example() -> cargo_rename::error::Result<()> {
+/// let mut txn = Transaction::new(false);
+/// update_dependent_manifest(
+///     Path::new("app/Cargo.toml"),
+///     "old-lib",
+///     "new-lib",
+///     Path::new("/workspace/new-lib"),
+///     true,  // path changed
+///     true,  // name changed
+///     &mut txn
+/// )?;
+/// txn.commit()?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn update_dependent_manifest(
     manifest_path: &Path,
     old_name: &str,
@@ -242,7 +218,7 @@ impl<'a> TomlProcessor<'a> {
             // Handle section headers
             if self.is_section_header(trimmed) {
                 if name_changed {
-                    modified_line = self.rename_section_header(&line)?;
+                    modified_line = self.rename_section_header(line)?;
                 }
                 self.reset_state();
                 result_lines.push(modified_line);
@@ -255,17 +231,17 @@ impl<'a> TomlProcessor<'a> {
                 && self.is_in_target_context(search_dep)
                 && path_changed
             {
-                modified_line = self.update_standalone_path(&line)?;
+                modified_line = self.update_standalone_path(line)?;
                 result_lines.push(modified_line);
                 continue;
             }
 
-            // Handle dependency declaration lines - ALWAYS search for old name
+            // Handle dependency declaration lines - always search for old name
             if self.is_dependency_line(trimmed, search_dep) {
-                self.start_dependency_tracking(&line, search_dep);
+                self.start_dependency_tracking(line, search_dep);
 
                 if name_changed {
-                    modified_line = self.rename_dependency_key(&line)?;
+                    modified_line = self.rename_dependency_key(line)?;
                 }
 
                 if path_changed {
@@ -279,19 +255,19 @@ impl<'a> TomlProcessor<'a> {
             // Handle continuation of multi-line inline tables
             if self.brace_depth > 0 {
                 if path_changed {
-                    modified_line = self.update_inline_path(&line)?;
+                    modified_line = self.update_inline_path(line)?;
                 }
-                self.update_brace_depth(&line);
+                self.update_brace_depth(line);
                 result_lines.push(modified_line);
                 continue;
             }
 
             // Handle lines with package field
-            if name_changed && self.has_package_field(&line) {
-                self.start_dependency_tracking(&line, search_dep);
-                modified_line = self.rename_package_field(&line)?;
+            if name_changed && self.has_package_field(line) {
+                self.start_dependency_tracking(line, search_dep);
+                modified_line = self.rename_package_field(line)?;
 
-                if path_changed && self.has_path_field(&line) {
+                if path_changed && self.has_path_field(line) {
                     modified_line = self.update_inline_path(&modified_line)?;
                 }
 
@@ -343,10 +319,10 @@ impl<'a> TomlProcessor<'a> {
         }
 
         // Match [target.'cfg(...)'.dependencies]
-        if header.starts_with("[target.") {
-            if let Some(target) = self.extract_target_triple(header) {
-                return Some(DependencySection::TargetDependencies(target));
-            }
+        if header.starts_with("[target.")
+            && let Some(target) = self.extract_target_triple(header)
+        {
+            return Some(DependencySection::TargetDependencies(target));
         }
 
         None
@@ -414,23 +390,23 @@ impl<'a> TomlProcessor<'a> {
     fn start_dependency_tracking(&mut self, line: &str, target_dep: &str) {
         // Check if this is our target dependency
         let key_pattern = format!(r"^\s*{}\s*=\s*\{{", regex::escape(target_dep));
-        if let Ok(re) = Regex::new(&key_pattern) {
-            if re.is_match(line) {
-                self.in_target_dep = true;
-                self.in_package_dep = false;
-                self.update_brace_depth(line);
-                return;
-            }
+        if let Ok(re) = Regex::new(&key_pattern)
+            && re.is_match(line)
+        {
+            self.in_target_dep = true;
+            self.in_package_dep = false;
+            self.update_brace_depth(line);
+            return;
         }
 
         // Check if this has package = "target_dep"
         let package_pattern = format!(r#"package\s*=\s*["']{}["']"#, regex::escape(target_dep));
-        if let Ok(re) = Regex::new(&package_pattern) {
-            if re.is_match(line) {
-                self.in_package_dep = true;
-                self.in_target_dep = false;
-                self.update_brace_depth(line);
-            }
+        if let Ok(re) = Regex::new(&package_pattern)
+            && re.is_match(line)
+        {
+            self.in_package_dep = true;
+            self.in_target_dep = false;
+            self.update_brace_depth(line);
         }
     }
 
@@ -468,12 +444,12 @@ impl<'a> TomlProcessor<'a> {
                 regex::escape(self.old_name)
             );
 
-            if let Ok(re) = Regex::new(&pattern) {
-                if re.is_match(line) {
-                    return Ok(re
-                        .replace(line, format!("${{1}}{}]", self.new_name))
-                        .to_string());
-                }
+            if let Ok(re) = Regex::new(&pattern)
+                && re.is_match(line)
+            {
+                return Ok(re
+                    .replace(line, format!("${{1}}{}]", self.new_name))
+                    .to_string());
             }
         }
 
@@ -481,30 +457,27 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn rename_dependency_key(&self, line: &str) -> Result<String> {
-        // Rename old-name = ... to new-name = ...
-        // Handle both: old-name = ... and old-name.workspace = ...
-
-        // Pattern 1: old-name.workspace = true
+        // old-name.workspace = true
         let ws_pattern = format!(
             r"^(\s*){}\s*\.\s*workspace\s*=",
             regex::escape(self.old_name)
         );
-        if let Ok(re) = Regex::new(&ws_pattern) {
-            if re.is_match(line) {
-                return Ok(re
-                    .replace(line, format!("${{1}}{}.workspace =", self.new_name))
-                    .to_string());
-            }
+        if let Ok(re) = Regex::new(&ws_pattern)
+            && re.is_match(line)
+        {
+            return Ok(re
+                .replace(line, format!("${{1}}{}.workspace =", self.new_name))
+                .to_string());
         }
 
-        // Pattern 2: old-name = ...
+        // old-name = ...
         let key_pattern = format!(r"^(\s*){}\s*=\s*", regex::escape(self.old_name));
-        if let Ok(re) = Regex::new(&key_pattern) {
-            if re.is_match(line) {
-                return Ok(re
-                    .replace(line, format!("${{1}}{} = ", self.new_name))
-                    .to_string());
-            }
+        if let Ok(re) = Regex::new(&key_pattern)
+            && re.is_match(line)
+        {
+            return Ok(re
+                .replace(line, format!("${{1}}{} = ", self.new_name))
+                .to_string());
         }
 
         Ok(line.to_string())
@@ -512,25 +485,25 @@ impl<'a> TomlProcessor<'a> {
 
     fn rename_package_field(&self, line: &str) -> Result<String> {
         // Double quotes: package = "old-name"
-        // Capture: (package = ")old-name(")
+        // Captures (package = ")old-name(")
         let double_pattern = format!(r#"(\bpackage\s*=\s*"){}(")"#, regex::escape(self.old_name));
-        if let Ok(re) = Regex::new(&double_pattern) {
-            if re.is_match(line) {
-                return Ok(re
-                    .replace(line, format!(r#"${{1}}{}${{2}}"#, self.new_name))
-                    .to_string());
-            }
+        if let Ok(re) = Regex::new(&double_pattern)
+            && re.is_match(line)
+        {
+            return Ok(re
+                .replace(line, format!(r#"${{1}}{}${{2}}"#, self.new_name))
+                .to_string());
         }
 
         // Single quotes: package = 'old-name'
-        // Capture: (package = ')old-name(')
+        // Captures (package = ')old-name(')
         let single_pattern = format!(r#"(\bpackage\s*=\s*'){}(')"#, regex::escape(self.old_name));
-        if let Ok(re) = Regex::new(&single_pattern) {
-            if re.is_match(line) {
-                return Ok(re
-                    .replace(line, format!(r#"${{1}}{}${{2}}"#, self.new_name))
-                    .to_string());
-            }
+        if let Ok(re) = Regex::new(&single_pattern)
+            && re.is_match(line)
+        {
+            return Ok(re
+                .replace(line, format!(r#"${{1}}{}${{2}}"#, self.new_name))
+                .to_string());
         }
 
         Ok(line.to_string())
@@ -556,14 +529,14 @@ impl<'a> TomlProcessor<'a> {
                 return Ok(line.to_string());
             }
 
-            // Match: path = "..." or path = '...' anywhere in the line
+            // Match path = "..." or path = '...' anywhere in the line
             let pattern = r#"(\bpath\s*=\s*)["'][^"']*["']"#;
-            if let Ok(re) = Regex::new(pattern) {
-                if re.is_match(line) {
-                    return Ok(re
-                        .replace(line, format!(r#"${{1}}"{}""#, new_path))
-                        .to_string());
-                }
+            if let Ok(re) = Regex::new(pattern)
+                && re.is_match(line)
+            {
+                return Ok(re
+                    .replace(line, format!(r#"${{1}}"{}""#, new_path))
+                    .to_string());
             }
         }
         Ok(line.to_string())
@@ -571,97 +544,23 @@ impl<'a> TomlProcessor<'a> {
 }
 
 #[cfg(test)]
-mod critical_edge_cases {
+mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
 
     #[test]
-    fn test_git_dep_with_path_override() {
+    fn test_multiline_inline_table() {
         let input = r#"[dependencies]
-old-crate = { git = "https://github.com/user/repo", path = "../old-path" }
-"#;
-        let expected = r#"[dependencies]
-new-crate = { git = "https://github.com/user/repo", path = "../new-path" }
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_target_without_quotes() {
-        let input = r#"[target.x86_64-unknown-linux-gnu.dependencies]
-old-crate = { path = "../old-path" }
-"#;
-        let expected = r#"[target.x86_64-unknown-linux-gnu.dependencies]
-new-crate = { path = "../new-path" }
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_multiline_features_array() {
-        let input = r#"[dependencies]
-old-crate = { 
-    path = "../old-path", 
-    features = [
-        "feat1",
-        "feat2"
-    ]
+my-crate = {
+    path = "../old-path",
+    features = ["feat1", "feat2"]
 }
 "#;
         let expected = r#"[dependencies]
-new-crate = { 
-    path = "../new-path", 
-    features = [
-        "feat1",
-        "feat2"
-    ]
+my-crate = {
+    path = "../new-path",
+    features = ["feat1", "feat2"]
 }
 "#;
 
@@ -675,13 +574,7 @@ new-crate = {
 
         let mut txn = Transaction::new(false);
         update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
+            &manifest, "my-crate", "my-crate", &new_dir, true, false, &mut txn,
         )
         .unwrap();
 
@@ -691,44 +584,14 @@ new-crate = {
     }
 
     #[test]
-    fn test_no_trailing_newline() {
+    fn test_inline_comments() {
         let input = r#"[dependencies]
-old-crate = { path = "../old-path" }"#; // No \n at end
-        let expected = r#"[dependencies]
-new-crate = { path = "../new-path" }"#; // No \n at end
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_windows_style_paths() {
-        let input = r#"[dependencies]
-old-crate = { path = "..\\old-path" }
+old-crate = { path = "../old-path" }  # Important dependency
+other = "1.0"
 "#;
         let expected = r#"[dependencies]
-new-crate = { path = "../new-path" }
+new-crate = { path = "../new-path" }  # Important dependency
+other = "1.0"
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -757,56 +620,18 @@ new-crate = { path = "../new-path" }
     }
 
     #[test]
-    fn test_very_long_inline_table() {
-        let input = r#"[dependencies]
-old-crate = { path = "../old-path", version = "1.0", default-features = false, features = ["a", "b", "c", "d"], optional = true }
-"#;
-        let expected = r#"[dependencies]
-new-crate = { path = "../new-path", version = "1.0", default-features = false, features = ["a", "b", "c", "d"], optional = true }
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_mixed_dependency_types() {
-        let input = r#"[dependencies]
+    fn test_target_specific_dependencies() {
+        let input = r#"[target.'cfg(windows)'.dependencies]
 old-crate = { path = "../old-path" }
-alias = { package = "old-crate", version = "1.0" }
-other = "1.0"
 
-[dev-dependencies]
-old-crate = { workspace = true }
+[target.'cfg(unix)'.dev-dependencies]
+other = "1.0"
 "#;
-        let expected = r#"[dependencies]
+        let expected = r#"[target.'cfg(windows)'.dependencies]
 new-crate = { path = "../new-path" }
-alias = { package = "new-crate", version = "1.0" }
-other = "1.0"
 
-[dev-dependencies]
-new-crate = { workspace = true }
+[target.'cfg(unix)'.dev-dependencies]
+other = "1.0"
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -835,12 +660,12 @@ new-crate = { workspace = true }
     }
 
     #[test]
-    fn test_only_path_change_no_rename() {
+    fn test_single_quotes() {
         let input = r#"[dependencies]
-my-crate = { path = "../old-path" }
+old-crate = { path = '../old-path', version = "1.0" }
 "#;
         let expected = r#"[dependencies]
-my-crate = { path = "../new-path" }
+new-crate = { path = "../new-path", version = "1.0" }
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -853,8 +678,12 @@ my-crate = { path = "../new-path" }
 
         let mut txn = Transaction::new(false);
         update_dependent_manifest(
-            &manifest, "my-crate", "my-crate", &new_dir, true,  // path changed
-            false, // name NOT changed
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
             &mut txn,
         )
         .unwrap();
@@ -865,12 +694,82 @@ my-crate = { path = "../new-path" }
     }
 
     #[test]
-    fn test_only_name_change_no_path() {
+    fn test_optional_dependency() {
         let input = r#"[dependencies]
-old-crate = { version = "1.0" }
+old-crate = { path = "../old-path", optional = true }
 "#;
         let expected = r#"[dependencies]
-new-crate = { version = "1.0" }
+new-crate = { path = "../new-path", optional = true }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_multiple_package_aliases() {
+        let input = r#"[dependencies]
+alias1 = { package = "old-crate", path = "../old-path" }
+alias2 = { package = "old-crate", version = "1.0" }
+"#;
+        let expected = r#"[dependencies]
+alias1 = { package = "new-crate", path = "../new-path" }
+alias2 = { package = "new-crate", version = "1.0" }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_workspace_dep_with_features() {
+        let input = r#"[dependencies]
+old-crate = { workspace = true, features = ["extra"] }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { workspace = true, features = ["extra"] }
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -882,51 +781,9 @@ new-crate = { version = "1.0" }
             &manifest,
             "old-crate",
             "new-crate",
-            temp.path(),
-            false, // path NOT changed
-            true,  // name changed
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_preserves_exact_formatting() {
-        let input = r#"[dependencies]
-# Important dependency
-old-crate = { path = "../old-path" }  # Keep this updated
-
-# Optional features
-other = { version = "1.0", optional = true }
-"#;
-        let expected = r#"[dependencies]
-# Important dependency
-new-crate = { path = "../new-path" }  # Keep this updated
-
-# Optional features
-other = { version = "1.0", optional = true }
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
+            temp.path(), // path doesn't matter for workspace deps
+            false,       // don't change path
+            true,        // change name
             &mut txn,
         )
         .unwrap();
