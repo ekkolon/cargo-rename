@@ -292,7 +292,7 @@ fn test_unix_absolute_paths() {
     let temp = create_test_workspace();
     let workspace_root = temp.path();
 
-    let target = workspace_root.join("services");
+    let target = workspace_root.join("services/unix-crate");
 
     run_rename(
         workspace_root,
@@ -303,7 +303,7 @@ fn test_unix_absolute_paths() {
     .success();
 
     assert!(
-        target.join("unix-crate/Cargo.toml").exists(),
+        target.join("Cargo.toml").exists(),
         "Expected services/unix-crate/Cargo.toml"
     );
 }
