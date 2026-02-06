@@ -1,44 +1,74 @@
-#![doc = include_str!("../README.md")]
-
-//! A tool for renaming Cargo packages, handling all references automatically.
+//! `cargo-rename` performs a coordinated, all-or-nothing rename of a Cargo
+//! package.
 //!
-//! ## Usage
+//! It handles the necessary updates across Cargo.toml, source code, and the
+//! file system to ensure the project remains compilable. This includes:
 //!
-//! Use the main entry point:
-//! ```no_run
-//! # fn main() -> cargo_rename::Result<()> {
-//! cargo_rename::run()?;
-//! # Ok(())
-//! # }
+//! - **Manifests**: Updating `[package].name` and dependency entries in the workspace.
+//! - **Source Code**: Rewriting `use` statements and qualified paths.
+//! - **Filesystem**: Optionally moving the package directory to match the new name.
+//!
+//! **Safety**
+//!
+//! All changes execute inside a transaction. Every file write and directory move is
+//! tracked. If any step fails, the project is automatically restored to its exact
+//! previous state
+//!
+//! ## Quick Start
+//!
+//! ```bash
+//! cargo install cargo-rename
 //! ```
 //!
-//! Or directly control the rename:
+//! ```bash
+//! # Rename a package and update all references
+//! cargo rename old-name new-name
+//!
+//! # Rename and move the directory
+//! cargo rename old-name new-name --move
+//!
+//! # Rename and move the directory to a new location
+//! cargo rename old-name new-name --move crates/new-name
+//!
+//! # Dry run to preview changes
+//! cargo rename old-name new-name --dry-run
+//! ```
+//!
+//! ## Library Usage
+//!
+//! You can also use `cargo-rename` programmatically.
+//!
 //! ```no_run
-//! # fn example() -> cargo_rename::Result<()> {
-//! let args = cargo_rename::RenameArgs {
+//! use cargo_rename::{execute, RenameArgs};
+//! use std::path::PathBuf;
+//!
+//! # fn main() -> cargo_rename::Result<()> {
+//! let args = RenameArgs {
 //!     old_name: "old-crate".into(),
 //!     new_name: "new-crate".into(),
-//!     outdir: None,
+//!     outdir: Some(Some(PathBuf::from("libs/new-crate"))),
 //!     manifest_path: None,
 //!     dry_run: false,
 //!     yes: true,
 //!     allow_dirty: false,
 //! };
 //!
-//! cargo_rename::execute(args)?;
+//! execute(args)?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## Modules
+//! ## Scope and Limitations
 //!
-//! - **`cli`**: Command-line argument definitions
-//! - **`steps`**: Orchestration logic
-//! - **`error`**: Error types
-//! - **`fs`**: Transaction support
-//! - **`cargo`**: Manifest manipulation
-//! - **`rewrite`**: Source code rewriting
-//! - **`verify`**: Validation checks
+//! - **Binaries**: `[[bin]]` targets are not renamed to preserve binary compatibility.
+//! - **Macros**: Identifiers generated dynamically inside macros may not be detected.
+//!
+//! ## Safety Checks
+//!
+//! By default, the tool enforces these checks before running:
+//! - `cargo metadata` must resolve successfully.
+//! - The new name must be a valid crate name.
+//! - The git working directory must be clean.
 
 pub mod cli;
 pub mod error;
