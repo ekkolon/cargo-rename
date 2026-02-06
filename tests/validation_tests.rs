@@ -124,8 +124,11 @@ fn test_same_name_without_move_fails() {
     let workspace_root = temp.path();
 
     run_rename(workspace_root, "crate-a", "crate-a", &[])
-        .failure()
-        .stderr(predicate::str::contains("same as").or(predicate::str::contains("Nothing to do")));
+        .success()
+        .stdout(
+            predicate::str::contains("No changes needed")
+                .or(predicate::str::contains("Nothing to do")),
+        );
 }
 
 #[test]

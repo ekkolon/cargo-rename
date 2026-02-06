@@ -45,7 +45,7 @@
 //! # fn main() -> cargo_rename::Result<()> {
 //! let args = RenameArgs {
 //!     old_name: "old-crate".into(),
-//!     new_name: "new-crate".into(),
+//!     new_name: Some("new-crate".into()),
 //!     outdir: Some(Some(PathBuf::from("libs/new-crate"))),
 //!     manifest_path: None,
 //!     dry_run: false,

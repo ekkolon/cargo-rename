@@ -111,7 +111,7 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
 /// are made during validation.
 pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
     // Validate new package name
-    validate_package_name(&args.new_name)?;
+    validate_package_name(&args.effective_new_name())?;
 
     // Validate directory path (if --move specified)
     if let Some(Some(custom_path)) = &args.outdir {
@@ -142,14 +142,6 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
         return Err(e);
     }
 
-    // Ensure operation would change something
-    if args.old_name == args.new_name && !args.should_move() {
-        return Err(RenameError::Other(anyhow::anyhow!(
-            "New name '{}' is the same as the old name and --move was not specified. Nothing to do.",
-            args.new_name
-        )));
-    }
-
     // Check target directory doesn't exist (if moving)
     if args.should_move() {
         let old_dir = pkg.manifest_path.parent().unwrap().as_std_path();
@@ -157,7 +149,8 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
             .calculate_new_dir(old_dir, metadata.workspace_root.as_std_path())
             .unwrap();
 
-        if new_dir.exists() {
+        // Only check if target exists when actually moving to a different location
+        if old_dir != new_dir && new_dir.exists() {
             return Err(RenameError::DirectoryExists(new_dir));
         }
 

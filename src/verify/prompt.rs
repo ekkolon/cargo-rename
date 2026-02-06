@@ -50,7 +50,7 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
         "  {} {} → {}",
         "Package:".bold(),
         args.old_name.yellow(),
-        args.new_name.green()
+        args.effective_new_name().green()
     );
 
     println!("  {} Update package name in Cargo.toml", "✓".green());

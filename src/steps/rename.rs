@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 /// Arguments for the `rename` subcommand.
 #[derive(Parser, Debug, Clone)]
 pub struct RenameArgs {
-    /// Current name of the package to rename
+    /// Current name of the package
     pub old_name: String,
 
-    /// New name for the package
-    pub new_name: String,
+    /// New name for the package (optional if only moving)
+    pub new_name: Option<String>,
 
     /// Move the package to a new directory
     ///
@@ -54,12 +54,36 @@ impl RenameArgs {
         self.outdir.is_some()
     }
 
+    /// Returns the effective new name (defaults to old_name if not specified).
+    pub fn effective_new_name(&self) -> &str {
+        self.new_name.as_deref().unwrap_or(&self.old_name)
+    }
+
+    /// Validates the arguments are coherent.
+    pub fn validate(&self) -> Result<()> {
+        // Case 1: Neither name nor move specified
+        if self.new_name.is_none() && self.outdir.is_none() {
+            return Err(RenameError::Other(anyhow::anyhow!(
+                "Must specify either NEW_NAME or --move DIR"
+            )));
+        }
+
+        // Case 2: --move without argument but no new name
+        if matches!(self.outdir, Some(None)) && self.new_name.is_none() {
+            return Err(RenameError::Other(anyhow::anyhow!(
+                "--move requires an explicit directory when not renaming the package"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Calculates the new directory path.
     ///
     /// Returns `None` if package stays in same directory.
     ///
     /// ## Behavior
-    /// - `--move`: Renames directory to `new_name` in same parent
+    /// - `--move`: Renames directory to `effective_new_name()` in same parent
     /// - `--move <path>`: Moves to `workspace_root/<path>`
     pub fn calculate_new_dir(&self, old_dir: &Path, workspace_root: &Path) -> Option<PathBuf> {
         if !self.should_move() {
@@ -68,34 +92,54 @@ impl RenameArgs {
 
         Some(match &self.outdir {
             Some(Some(custom_path)) => workspace_root.join(custom_path),
-            Some(None) => old_dir
-                .parent()
-                .unwrap_or(workspace_root)
-                .join(&self.new_name),
+            Some(None) => {
+                // Use effective new name (handles rename-only and move-only cases)
+                old_dir
+                    .parent()
+                    .unwrap_or(workspace_root)
+                    .join(self.effective_new_name())
+            }
             None => unreachable!(),
         })
+    }
+
+    /// Check if operation would actually change anything.
+    pub fn would_change_anything(&self, current_dir: &Path, workspace_root: &Path) -> Result<bool> {
+        let name_changed = self
+            .new_name
+            .as_ref()
+            .map(|n| n != &self.old_name)
+            .unwrap_or(false);
+
+        let path_changed =
+            if let Some(new_dir) = self.calculate_new_dir(current_dir, workspace_root) {
+                new_dir != current_dir
+            } else {
+                false
+            };
+
+        Ok(name_changed || path_changed)
     }
 }
 
 /// Executes a package rename operation.
 ///
 /// ## Phases
-/// 1. Load metadata via `cargo metadata`
-/// 2. Pre-flight checks (validation, git status)
-/// 3. User confirmation (unless `--yes`)
-/// 4. Stage operations in transaction
-/// 5. Commit atomically
-/// 6. Verify workspace with `cargo metadata`
+///
+/// 1. Validate arguments
+/// 2. Load metadata via `cargo metadata`
+/// 3. Pre-flight checks (validation, git status)
+/// 4. User confirmation (unless `--yes`)
+/// 5. Stage operations in transaction
+/// 6. Commit atomically
+/// 7. Verify workspace with `cargo metadata`
 ///
 /// Returns error if any phase fails. Attempts rollback if commit fails.
 pub fn execute(args: RenameArgs) -> Result<()> {
+    args.validate()?;
+
     let metadata = load_metadata(&args)?;
     preflight_checks(&args, &metadata)?;
-
-    if !confirm_operation(&args, &metadata)? {
-        println!("\n{}", "Operation cancelled.".yellow());
-        return Err(RenameError::Cancelled);
-    }
 
     let target_pkg = metadata
         .packages
@@ -108,25 +152,40 @@ pub fn execute(args: RenameArgs) -> Result<()> {
 
     log::debug!("Package '{}' at: {}", args.old_name, old_dir.display());
 
+    // Check if anything would change
+    if !args.would_change_anything(old_dir, metadata.workspace_root.as_std_path())? {
+        println!(
+            "{}",
+            format!(
+                "No changes needed: '{}' is already at '{}'",
+                args.old_name,
+                old_dir.display()
+            )
+            .yellow()
+        );
+        return Ok(());
+    }
+
+    if !confirm_operation(&args, &metadata)? {
+        println!("\n{}", "Operation cancelled.".yellow());
+        return Err(RenameError::Cancelled);
+    }
+
     let new_dir = args
         .calculate_new_dir(old_dir, metadata.workspace_root.as_std_path())
         .unwrap_or_else(|| old_dir.to_path_buf());
 
     log::debug!("New directory: {}", new_dir.display());
 
-    let name_changed = args.old_name != args.new_name;
+    let effective_new_name = args.effective_new_name();
+    let name_changed = effective_new_name != args.old_name.as_str();
     let path_changed = old_dir != new_dir;
-
-    if !name_changed && !path_changed {
-        return Err(RenameError::Other(anyhow::anyhow!(
-            "Nothing to do: name and path unchanged"
-        )));
-    }
 
     let mut txn = Transaction::new(args.dry_run);
 
     if let Err(e) = stage_rename_operations(
         &args,
+        effective_new_name,
         &metadata,
         old_manifest_path,
         old_dir,
@@ -148,7 +207,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
 
     txn.print_summary(
         &args.old_name,
-        &args.new_name,
+        effective_new_name,
         metadata.workspace_root.as_std_path(),
     );
 
@@ -157,14 +216,13 @@ pub fn execute(args: RenameArgs) -> Result<()> {
             "\n{} {} → {}",
             "✓ Successfully renamed".green().bold(),
             args.old_name.yellow(),
-            args.new_name.green().bold()
+            effective_new_name.green().bold()
         );
     }
 
     Ok(())
 }
 
-// Loads Cargo workspace metadata.
 fn load_metadata(args: &RenameArgs) -> Result<cargo_metadata::Metadata> {
     let mut cmd = MetadataCommand::new();
 
@@ -194,13 +252,10 @@ fn load_metadata(args: &RenameArgs) -> Result<cargo_metadata::Metadata> {
     })
 }
 
-// Stages all rename operations in a transaction.
-//
-// Order: directory move, package manifest, dependents, workspace, source code.
-// No file system modifications until `txn.commit()`.
 #[allow(clippy::too_many_arguments)]
 fn stage_rename_operations(
     args: &RenameArgs,
+    effective_new_name: &str,
     metadata: &cargo_metadata::Metadata,
     old_manifest_path: &Path,
     old_dir: &Path,
@@ -209,9 +264,20 @@ fn stage_rename_operations(
     path_changed: bool,
     txn: &mut Transaction,
 ) -> Result<()> {
-    if path_changed {
+    if !name_changed && !path_changed {
+        println!(
+            "No changes needed: '{}' is already at '{}'",
+            args.old_name,
+            old_dir.display()
+        );
+
+        return Ok(());
+    }
+
+    // Only stage directory move if paths are actually different
+    if path_changed && old_dir != new_dir {
         log::info!(
-            "Staging directory move: {} → {}",
+            "Staging directory move {} → {}",
             old_dir.display(),
             new_dir.display()
         );
@@ -220,7 +286,7 @@ fn stage_rename_operations(
 
     if name_changed {
         log::info!("Updating package name in {}", old_manifest_path.display());
-        update_package_name(old_manifest_path, &args.new_name, txn)?;
+        update_package_name(old_manifest_path, effective_new_name, txn)?;
     }
 
     log::info!("Updating dependent manifests...");
@@ -252,7 +318,7 @@ fn stage_rename_operations(
         update_dependent_manifest(
             member.manifest_path.as_std_path(),
             &args.old_name,
-            &args.new_name,
+            effective_new_name,
             new_dir,
             path_changed,
             name_changed,
@@ -269,7 +335,7 @@ fn stage_rename_operations(
             update_workspace_manifest(
                 &root_manifest,
                 &args.old_name,
-                &args.new_name,
+                effective_new_name,
                 old_dir,
                 new_dir,
                 should_update_members,
@@ -282,14 +348,13 @@ fn stage_rename_operations(
 
     if name_changed {
         log::info!("Updating source code references...");
-        update_source_code(metadata, &args.old_name, &args.new_name, txn)?;
+        update_source_code(metadata, &args.old_name, effective_new_name, txn)?;
     }
 
     log::debug!("Staged {} operations", txn.len());
     Ok(())
 }
 
-// Handles errors during operation staging.
 fn handle_staging_error(e: RenameError, txn: Transaction, args: &RenameArgs) -> Result<()> {
     eprintln!("{} {}", "Error during rename:".red().bold(), e);
 
@@ -300,7 +365,6 @@ fn handle_staging_error(e: RenameError, txn: Transaction, args: &RenameArgs) -> 
     Err(e)
 }
 
-// Handles errors during transaction commit.
 fn handle_commit_error(e: RenameError, txn: &mut Transaction, args: &RenameArgs) -> Result<()> {
     eprintln!("{} {}", "Error during commit:".red().bold(), e);
     eprintln!("Some operations may have been applied.");
@@ -326,10 +390,6 @@ fn handle_commit_error(e: RenameError, txn: &mut Transaction, args: &RenameArgs)
     Err(e)
 }
 
-// Verifies workspace after rename.
-//
-// Runs `cargo metadata` to check Cargo can still parse the workspace.
-// Logs warnings but doesn't fail (rename already succeeded).
 fn verify_workspace(workspace_root: &Path, structure_changed: bool) -> Result<()> {
     log::info!("Verifying workspace structure...");
 
@@ -363,17 +423,106 @@ fn verify_workspace(workspace_root: &Path, structure_changed: bool) -> Result<()
     }
 }
 
-// Tests remain unchanged
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
     #[test]
+    fn test_validate_requires_either_name_or_move() {
+        let args = RenameArgs {
+            old_name: "old".into(),
+            new_name: None,
+            outdir: None,
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_move_without_arg_requires_new_name() {
+        let args = RenameArgs {
+            old_name: "old".into(),
+            new_name: None,
+            outdir: Some(None), // --move without DIR
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_new_name_only() {
+        let args = RenameArgs {
+            old_name: "old".into(),
+            new_name: Some("new".into()),
+            outdir: None,
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_move_with_explicit_dir() {
+        let args = RenameArgs {
+            old_name: "old".into(),
+            new_name: None,
+            outdir: Some(Some(PathBuf::from("new-location"))),
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_effective_new_name_defaults_to_old_name() {
+        let args = RenameArgs {
+            old_name: "my-crate".into(),
+            new_name: None,
+            outdir: Some(Some(PathBuf::from("new-location"))),
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert_eq!(args.effective_new_name(), "my-crate");
+    }
+
+    #[test]
+    fn test_effective_new_name_returns_new_name_when_specified() {
+        let args = RenameArgs {
+            old_name: "old-crate".into(),
+            new_name: Some("new-crate".into()),
+            outdir: None,
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert_eq!(args.effective_new_name(), "new-crate");
+    }
+
+    #[test]
     fn test_should_move() {
         let mut args = RenameArgs {
             old_name: "old".into(),
-            new_name: "new".into(),
+            new_name: Some("new".into()),
             outdir: None,
             manifest_path: None,
             dry_run: false,
@@ -397,7 +546,7 @@ mod tests {
 
         let args = RenameArgs {
             old_name: "old-pkg".into(),
-            new_name: "new-pkg".into(),
+            new_name: Some("new-pkg".into()),
             outdir: None,
             manifest_path: None,
             dry_run: false,
@@ -415,7 +564,7 @@ mod tests {
 
         let args = RenameArgs {
             old_name: "old-pkg".into(),
-            new_name: "new-pkg".into(),
+            new_name: Some("new-pkg".into()),
             outdir: Some(None), // --move without argument
             manifest_path: None,
             dry_run: false,
@@ -423,10 +572,31 @@ mod tests {
             allow_dirty: false,
         };
 
-        // Should keep parent directory (crates/)
         assert_eq!(
             args.calculate_new_dir(&old_dir, workspace),
             Some(workspace.join("crates/new-pkg"))
+        );
+    }
+
+    #[test]
+    fn test_calculate_new_dir_move_only_uses_old_name() {
+        let workspace = Path::new("/workspace");
+        let old_dir = workspace.join("crates/my-crate");
+
+        let args = RenameArgs {
+            old_name: "my-crate".into(),
+            new_name: None, // Move only, no rename
+            outdir: Some(None),
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        // Should use old_name as directory name since no new_name specified
+        assert_eq!(
+            args.calculate_new_dir(&old_dir, workspace),
+            Some(workspace.join("crates/my-crate"))
         );
     }
 
@@ -437,7 +607,7 @@ mod tests {
 
         let args = RenameArgs {
             old_name: "old-pkg".into(),
-            new_name: "new-pkg".into(),
+            new_name: Some("new-pkg".into()),
             outdir: Some(Some(PathBuf::from("libs/api"))),
             manifest_path: None,
             dry_run: false,
@@ -458,7 +628,7 @@ mod tests {
 
         let args = RenameArgs {
             old_name: "old-pkg".into(),
-            new_name: "new-pkg".into(),
+            new_name: Some("new-pkg".into()),
             outdir: Some(None),
             manifest_path: None,
             dry_run: false,
@@ -466,10 +636,63 @@ mod tests {
             allow_dirty: false,
         };
 
-        // Should still work when parent is workspace root
         assert_eq!(
             args.calculate_new_dir(&old_dir, workspace),
             Some(workspace.join("new-pkg"))
         );
+    }
+
+    #[test]
+    fn test_would_change_anything_name_change() {
+        let workspace = Path::new("/workspace");
+        let current_dir = workspace.join("my-crate");
+
+        let args = RenameArgs {
+            old_name: "old-crate".into(),
+            new_name: Some("new-crate".into()),
+            outdir: None,
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(args.would_change_anything(&current_dir, workspace).unwrap());
+    }
+
+    #[test]
+    fn test_would_change_anything_path_change() {
+        let workspace = Path::new("/workspace");
+        let current_dir = workspace.join("my-crate");
+
+        let args = RenameArgs {
+            old_name: "my-crate".into(),
+            new_name: None,
+            outdir: Some(Some(PathBuf::from("libs/my-crate"))),
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(args.would_change_anything(&current_dir, workspace).unwrap());
+    }
+
+    #[test]
+    fn test_would_change_anything_no_change() {
+        let workspace = Path::new("/workspace");
+        let current_dir = workspace.join("my-crate");
+
+        let args = RenameArgs {
+            old_name: "my-crate".into(),
+            new_name: Some("my-crate".into()), // Same name
+            outdir: None,
+            manifest_path: None,
+            dry_run: false,
+            yes: false,
+            allow_dirty: false,
+        };
+
+        assert!(!args.would_change_anything(&current_dir, workspace).unwrap());
     }
 }

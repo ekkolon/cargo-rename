@@ -82,10 +82,14 @@ pub fn run_rename(
     extra_args: &[&str],
 ) -> assert_cmd::assert::Assert {
     let mut cmd = cargo_bin_cmd!("cargo-rename");
-    cmd.arg("rename")
-        .arg(old_name)
-        .arg(new_name)
-        .arg("--yes")
+    cmd.arg("rename").arg(old_name);
+
+    // Only add new_name if it's not empty (for move-only operations)
+    if !new_name.is_empty() {
+        cmd.arg(new_name);
+    }
+
+    cmd.arg("--yes")
         .arg("--allow-dirty")
         .args(extra_args)
         .current_dir(workspace_root);
