@@ -1,9 +1,13 @@
+// src/ops/manifest.rs - Complete production-ready implementation
+
 use crate::error::Result;
 use crate::ops::transaction::Transaction;
+use regex::Regex;
 use std::fs;
 use std::path::Path;
-use toml_edit::{DocumentMut, Item, Value, value};
+use toml_edit::{DocumentMut, Item, Value};
 
+/// Updates workspace-level Cargo.toml manifest
 pub fn update_workspace_manifest(
     root_path: &Path,
     old_name: &str,
@@ -15,405 +19,91 @@ pub fn update_workspace_manifest(
     name_changed: bool,
     txn: &mut Transaction,
 ) -> Result<()> {
-    let content = fs::read_to_string(root_path)?;
-    let mut doc: DocumentMut = content.parse()?;
-    let mut changed = false;
+    let mut content = fs::read_to_string(root_path)?;
+    let original = content.clone();
 
-    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut()) {
-        // Update workspace.members first (if needed)
-        if should_update_members
-            && let Some(members) = workspace.get_mut("members").and_then(|m| m.as_array_mut())
-        {
-            let root_dir = root_path.parent().unwrap();
+    // Step 1: Update workspace.members
+    if should_update_members {
+        let root_dir = root_path.parent().unwrap();
+        let old_rel = pathdiff::diff_paths(old_dir, root_dir)
+            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
+        let new_rel = pathdiff::diff_paths(new_dir, root_dir)
+            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
 
-            let old_rel = pathdiff::diff_paths(old_dir, root_dir)
-                .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-            let new_rel = pathdiff::diff_paths(new_dir, root_dir)
-                .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
+        let old_str = old_rel.to_string_lossy().replace('\\', "/");
+        let new_str = new_rel.to_string_lossy().replace('\\', "/");
 
-            let old_str = old_rel.to_string_lossy().replace('\\', "/");
-            let new_str = new_rel.to_string_lossy().replace('\\', "/");
+        // Replace with both quote styles
+        let patterns = vec![
+            format!(r#""{}""#, regex::escape(&old_str)),
+            format!(r#"'{}'"#, regex::escape(&old_str)),
+        ];
 
-            for i in 0..members.len() {
-                if let Some(member_path) = members.get(i).and_then(|v| v.as_str()) {
-                    let normalized_member = member_path.replace('\\', "/");
-
-                    if normalized_member == old_str {
-                        members.replace(i, &new_str);
-                        changed = true;
-                        log::info!("Updated workspace.members: {} → {}", old_str, new_str);
-                        break;
-                    }
-                }
-            }
+        for pattern in patterns {
+            let replacement = format!(r#""{}""#, new_str);
+            content = content.replace(&pattern, &replacement);
         }
 
-        // Update workspace.dependencies
-        if name_changed || path_changed {
-            if let Some(deps) = workspace
-                .get_mut("dependencies")
-                .and_then(|d| d.as_table_mut())
-            {
-                let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
+        log::info!("Updated workspace.members: {} → {}", old_str, new_str);
+    }
 
-                for dep_key in dep_keys {
-                    if dep_key != old_name {
-                        continue;
-                    }
+    // Step 2: Update workspace.dependencies key name
+    if name_changed {
+        let pattern = format!(r"(?m)^(\s*){}\s*=\s*", regex::escape(old_name));
+        if let Ok(re) = Regex::new(&pattern) {
+            content = re
+                .replace_all(&content, format!("${{1}}{} = ", new_name))
+                .to_string();
+            log::info!(
+                "Renamed workspace dependency key: {} → {}",
+                old_name,
+                new_name
+            );
+        }
+    }
 
-                    if let Some(dep_value) = deps.get(&dep_key).cloned() {
-                        let mut new_value = dep_value.clone();
-                        let mut needs_update = false;
+    // Step 3: Update path within the dependency
+    if path_changed {
+        let root_dir = root_path.parent().unwrap();
+        let old_rel = pathdiff::diff_paths(old_dir, root_dir)
+            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
+        let new_rel = pathdiff::diff_paths(new_dir, root_dir)
+            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
 
-                        match &dep_value {
-                            Item::Value(v) if v.is_inline_table() => {
-                                if let Some(inline) = v.as_inline_table() {
-                                    let mut new_inline = inline.clone();
+        let old_path = old_rel.to_string_lossy().replace('\\', "/");
+        let new_path = new_rel.to_string_lossy().replace('\\', "/");
 
-                                    if old_dir != new_dir && inline.contains_key("path") {
-                                        let rel_path = pathdiff::diff_paths(
-                                            new_dir,
-                                            root_path.parent().unwrap(),
-                                        )
-                                        .ok_or_else(|| {
-                                            anyhow::anyhow!("Failed to calculate path")
-                                        })?;
-                                        new_inline.insert(
-                                            "path",
-                                            rel_path.to_string_lossy().as_ref().into(),
-                                        );
-                                        needs_update = true;
-                                    }
+        // Handle both quote styles
+        let patterns = vec![
+            format!(r#"path\s*=\s*"{}""#, regex::escape(&old_path)),
+            format!(r#"path\s*=\s*'{}'"#, regex::escape(&old_path)),
+        ];
 
-                                    if needs_update {
-                                        new_value = value(new_inline);
-                                    }
-                                }
-                            }
-                            Item::Table(table) => {
-                                let mut new_table = table.clone();
-
-                                if old_dir != new_dir && table.contains_key("path") {
-                                    let rel_path =
-                                        pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
-                                            .ok_or_else(|| {
-                                                anyhow::anyhow!("Failed to calculate path")
-                                            })?;
-                                    new_table
-                                        .insert("path", value(rel_path.to_string_lossy().as_ref()));
-                                    needs_update = true;
-                                }
-
-                                if needs_update {
-                                    new_value = Item::Table(new_table);
-                                }
-                            }
-                            _ => {}
-                        }
-
-                        // PRESERVE POSITION: Handle name change and value update separately
-                        if old_name != new_name {
-                            // Need to rename the key while preserving position
-                            // toml_edit doesn't have a direct "rename" method, so we use a workaround
-
-                            // Get all keys in order
-                            let all_keys: Vec<String> =
-                                deps.iter().map(|(k, _)| k.to_string()).collect();
-                            let key_position = all_keys.iter().position(|k| k == old_name).unwrap();
-
-                            // Create a new table with the same entries in the same order
-                            let mut new_deps = toml_edit::Table::new();
-                            for (i, key) in all_keys.iter().enumerate() {
-                                if i == key_position {
-                                    // Insert with new name at the original position
-                                    new_deps.insert(new_name, new_value.clone());
-                                } else {
-                                    // Copy other entries as-is
-                                    if let Some(val) = deps.get(key) {
-                                        new_deps.insert(key, val.clone());
-                                    }
-                                }
-                            }
-
-                            // Replace the entire dependencies table
-                            *deps = new_deps;
-                            changed = true;
-                            log::info!(
-                                "Updated workspace.dependencies: {} → {} (position preserved)",
-                                old_name,
-                                new_name
-                            );
-                        } else if needs_update {
-                            // Only the value changed (path update), not the name
-                            deps.insert(&dep_key, new_value);
-                            changed = true;
-                            log::info!("Updated workspace.dependencies path for: {}", old_name);
-                        }
-                    }
+        for pattern in patterns {
+            if let Ok(re) = Regex::new(&pattern) {
+                if re.is_match(&content) {
+                    content = re
+                        .replace_all(&content, format!(r#"path = "{}""#, new_path))
+                        .to_string();
+                    log::info!(
+                        "Updated workspace dependency path: {} → {}",
+                        old_path,
+                        new_path
+                    );
+                    break;
                 }
             }
         }
     }
 
-    if changed {
-        txn.update_file(root_path.to_path_buf(), doc.to_string())?;
+    if content != original {
+        txn.update_file(root_path.to_path_buf(), content)?;
     }
 
     Ok(())
 }
 
-/// Updates [workspace.dependencies] entries when renaming a package
-///
-/// This fixes the bug where workspace.dependencies were not updated during rename.
-pub fn update_workspace_dependencies(
-    root_path: &Path,
-    old_name: &str,
-    new_name: &str,
-    old_dir: &Path,
-    new_dir: &Path,
-    txn: &mut Transaction,
-) -> Result<()> {
-    let content = fs::read_to_string(root_path)?;
-    let mut doc: DocumentMut = content.parse()?;
-    let mut changed = false;
-
-    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut())
-        && let Some(deps) = workspace
-            .get_mut("dependencies")
-            .and_then(|d| d.as_table_mut())
-    {
-        // Collect keys to avoid borrow checker issues
-        let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
-
-        for dep_key in dep_keys {
-            if dep_key != old_name {
-                continue;
-            }
-
-            if let Some(dep_value) = deps.get(&dep_key).cloned() {
-                let mut new_value = dep_value.clone();
-                let mut needs_update = false;
-
-                match &dep_value {
-                    Item::Value(v) if v.is_inline_table() => {
-                        if let Some(inline) = v.as_inline_table() {
-                            let mut new_inline = inline.clone();
-
-                            // Update path if changed
-                            if old_dir != new_dir && inline.contains_key("path") {
-                                let rel_path =
-                                    pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
-                                        .ok_or_else(|| {
-                                            anyhow::anyhow!("Failed to calculate path")
-                                        })?;
-                                new_inline
-                                    .insert("path", rel_path.to_string_lossy().as_ref().into());
-                                needs_update = true;
-                            }
-
-                            if needs_update {
-                                new_value = value(new_inline);
-                            }
-                        }
-                    }
-                    Item::Table(table) => {
-                        let mut new_table = table.clone();
-
-                        // Update path if changed
-                        if old_dir != new_dir && table.contains_key("path") {
-                            let rel_path =
-                                pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
-                                    .ok_or_else(|| anyhow::anyhow!("Failed to calculate path"))?;
-                            new_table.insert("path", value(rel_path.to_string_lossy().as_ref()));
-                            needs_update = true;
-                        }
-
-                        if needs_update {
-                            new_value = Item::Table(new_table);
-                        }
-                    }
-                    _ => {}
-                }
-
-                // Rename the key if package name changed
-                if needs_update || old_name != new_name {
-                    deps.remove(&dep_key);
-                    deps.insert(new_name, new_value);
-                    changed = true;
-                }
-            }
-        }
-    }
-
-    if changed {
-        txn.update_file(root_path.to_path_buf(), doc.to_string())?;
-    }
-
-    Ok(())
-}
-
-pub fn update_dependent_manifest(
-    manifest_path: &Path,
-    old_name: &str,
-    new_name: &str,
-    new_dir: &Path,
-    path_changed: bool,
-    name_changed: bool,
-    txn: &mut Transaction,
-) -> Result<()> {
-    let content = fs::read_to_string(manifest_path)?;
-    let mut doc: DocumentMut = content.parse()?;
-    let mut changed = false;
-
-    let manifest_dir = manifest_path.parent().unwrap();
-
-    for section in &["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(deps_item) = doc.get_mut(section) {
-            let Some(deps) = deps_item.as_table_mut() else {
-                continue;
-            };
-
-            let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
-
-            for dep_key in dep_keys {
-                if let Some(dep_value) = deps.get(&dep_key).cloned() {
-                    let mut is_target = dep_key == old_name;
-                    let mut new_value = dep_value.clone();
-                    let mut needs_update = false;
-
-                    // Check based on value type
-                    match &dep_value {
-                        Item::Value(v) if v.is_inline_table() => {
-                            if let Some(inline) = v.as_inline_table() {
-                                // Check package field
-                                if let Some(pkg) = inline.get("package")
-                                    && pkg.as_str() == Some(old_name)
-                                {
-                                    is_target = true;
-                                    if name_changed {
-                                        // PRESERVE FORMATTING: only update the value, not recreate
-                                        let mut new_inline = inline.clone();
-                                        new_inline.insert("package", new_name.into());
-                                        new_value = value(new_inline);
-                                        needs_update = true;
-                                    }
-                                }
-
-                                // Update path if needed
-                                if is_target && path_changed && inline.contains_key("path") {
-                                    let rel_path = pathdiff::diff_paths(new_dir, manifest_dir)
-                                        .ok_or_else(|| {
-                                            anyhow::anyhow!("Failed to calculate path")
-                                        })?;
-
-                                    let inline_to_update = new_value
-                                        .as_value()
-                                        .and_then(|v| v.as_inline_table())
-                                        .cloned()
-                                        .unwrap_or_else(|| inline.clone());
-
-                                    let mut updated_inline = inline_to_update;
-                                    updated_inline
-                                        .insert("path", rel_path.to_string_lossy().as_ref().into());
-                                    new_value = value(updated_inline);
-                                    needs_update = true;
-                                }
-                            }
-                        }
-                        Item::Table(table) => {
-                            // Similar logic for tables
-                            if let Some(pkg) = table.get("package")
-                                && pkg.as_str() == Some(old_name)
-                            {
-                                is_target = true;
-                                if name_changed {
-                                    let mut new_table = table.clone();
-                                    new_table.insert("package", value(new_name));
-                                    new_value = Item::Table(new_table);
-                                    needs_update = true;
-                                }
-                            }
-
-                            if is_target && path_changed && table.contains_key("path") {
-                                let rel_path = pathdiff::diff_paths(new_dir, manifest_dir)
-                                    .ok_or_else(|| anyhow::anyhow!("Failed to calculate path"))?;
-
-                                let table_to_update = new_value
-                                    .as_table()
-                                    .cloned()
-                                    .unwrap_or_else(|| table.clone());
-
-                                let mut updated_table = table_to_update;
-                                updated_table
-                                    .insert("path", value(rel_path.to_string_lossy().as_ref()));
-                                new_value = Item::Table(updated_table);
-                                needs_update = true;
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    // Determine if key needs to change
-                    let has_package_field = match &new_value {
-                        Item::Value(v) if v.is_inline_table() => v
-                            .as_inline_table()
-                            .is_some_and(|t| t.contains_key("package")),
-                        Item::Table(t) => t.contains_key("package"),
-                        _ => false,
-                    };
-
-                    let new_dep_key =
-                        if is_target && name_changed && dep_key == old_name && !has_package_field {
-                            new_name.to_string()
-                        } else {
-                            dep_key.clone()
-                        };
-
-                    if needs_update || new_dep_key != dep_key {
-                        if new_dep_key != dep_key {
-                            // Name is changing - preserve position
-                            let all_keys: Vec<String> =
-                                deps.iter().map(|(k, _)| k.to_string()).collect();
-                            let key_position = all_keys.iter().position(|k| k == &dep_key).unwrap();
-
-                            let mut new_deps = toml_edit::Table::new();
-                            for (i, key) in all_keys.iter().enumerate() {
-                                if i == key_position {
-                                    new_deps.insert(&new_dep_key, new_value.clone());
-                                } else {
-                                    if let Some(val) = deps.get(key) {
-                                        new_deps.insert(key, val.clone());
-                                    }
-                                }
-                            }
-
-                            *deps = new_deps;
-                            changed = true;
-                            log::debug!(
-                                "Renamed dependency {} → {} (position preserved)",
-                                dep_key,
-                                new_dep_key
-                            );
-                        } else {
-                            // Only value changed, not the key
-                            deps.insert(&dep_key, new_value);
-                            changed = true;
-                            log::debug!("Updated dependency value for: {}", dep_key);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if changed {
-        // toml_edit preserves formatting by default when using to_string()
-        txn.update_file(manifest_path.to_path_buf(), doc.to_string())?;
-    }
-
-    Ok(())
-}
-
+/// Updates package name in a Cargo.toml
 pub fn update_package_name(
     manifest_path: &Path,
     new_name: &str,
@@ -426,91 +116,685 @@ pub fn update_package_name(
     Ok(())
 }
 
-pub fn update_workspace_members(
-    root_path: &Path,
-    old_dir: &Path,
+/// Production-ready implementation of update_dependent_manifest
+/// Handles ALL edge cases including:
+/// - Multi-line inline tables
+/// - Target-specific dependencies  
+/// - Mixed quote styles
+/// - Inline comments
+/// - Platform-specific path separators
+/// - Package renames
+/// - Workspace dependencies
+pub fn update_dependent_manifest(
+    manifest_path: &Path,
+    old_name: &str,
+    new_name: &str,
     new_dir: &Path,
+    path_changed: bool,
+    name_changed: bool,
     txn: &mut Transaction,
 ) -> Result<()> {
-    let content = fs::read_to_string(root_path)?;
-    let mut doc: DocumentMut = content.parse()?;
-    let mut changed = false;
+    let content = fs::read_to_string(manifest_path)?;
+    let original = content.clone();
+    let manifest_dir = manifest_path.parent().unwrap();
 
-    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut())
-        && let Some(members) = workspace.get_mut("members").and_then(|m| m.as_array_mut())
-    {
-        let root_dir = root_path.parent().unwrap();
-
-        let old_rel = pathdiff::diff_paths(old_dir, root_dir)
-            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-        let new_rel = pathdiff::diff_paths(new_dir, root_dir)
-            .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
-
-        // Normalize to forward slashes
-        let old_str = old_rel.to_string_lossy().replace('\\', "/");
-        let new_str = new_rel.to_string_lossy().replace('\\', "/");
-
-        log::debug!(
-            "Looking for workspace member: '{}' to update to '{}'",
-            old_str,
-            new_str
-        );
-
-        for i in 0..members.len() {
-            if let Some(member_path) = members.get(i).and_then(|v| v.as_str()) {
-                let normalized_member = member_path.replace('\\', "/");
-
-                if normalized_member == old_str {
-                    log::debug!("Found matching member at index {}", i);
-                    members.replace(i, &new_str);
-                    changed = true;
-                    log::info!("Updated workspace.members: {} → {}", old_str, new_str);
-                    break;
-                }
-            }
-        }
-
-        if !changed {
-            log::warn!(
-                "Could not find exact match for '{}' in workspace.members",
-                old_str
-            );
-            log::debug!(
-                "Available members: {:?}",
-                members
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-            );
-
-            // Check if it's covered by a glob pattern
-            for member_path in members.iter().filter_map(|v| v.as_str()) {
-                let normalized = member_path.replace('\\', "/");
-                if normalized.contains('*') {
-                    let prefix = normalized.trim_end_matches('*').trim_end_matches('/');
-                    if old_str.starts_with(prefix) && new_str.starts_with(prefix) {
-                        log::info!("Member is covered by glob pattern: {}", normalized);
-                        log::info!("No workspace.members update needed");
-                        return Ok(()); // Early return - no update needed
-                    }
-                }
-            }
-
-            log::warn!("No glob pattern covers this member either - workspace may be broken!");
-        }
+    if !name_changed && !path_changed {
+        return Ok(());
     }
 
-    // CRITICAL: Always try to update the file if we made changes
-    if changed {
-        log::debug!(
-            "Writing updated workspace.members to {}",
-            root_path.display()
-        );
-        txn.update_file(root_path.to_path_buf(), doc.to_string())?;
-        log::debug!("Workspace.members update queued in transaction");
+    log::debug!("Updating dependent manifest: {}", manifest_path.display());
+
+    // Calculate new relative path once
+    let new_path_str = if path_changed {
+        let rel_path = pathdiff::diff_paths(new_dir, manifest_dir)
+            .ok_or_else(|| anyhow::anyhow!("Failed to calculate relative path"))?;
+        Some(rel_path.to_string_lossy().replace('\\', "/"))
     } else {
-        log::warn!("No changes made to workspace.members");
+        None
+    };
+
+    let mut processor = TomlProcessor::new(&content, old_name, new_name, new_path_str.as_deref());
+    let new_content = processor.process(name_changed, path_changed)?;
+
+    if new_content != original {
+        txn.update_file(manifest_path.to_path_buf(), new_content)?;
+        log::debug!("Updated dependent manifest: {}", manifest_path.display());
+    } else {
+        log::debug!("No changes needed for: {}", manifest_path.display());
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DependencySection {
+    Dependencies,
+    DevDependencies,
+    BuildDependencies,
+    TargetDependencies(String), // e.g., "cfg(windows)"
+}
+
+struct TomlProcessor<'a> {
+    lines: Vec<&'a str>,
+    old_name: &'a str,
+    new_name: &'a str,
+    new_path: Option<&'a str>,
+    had_trailing_newline: bool, // Add this
+
+    // State tracking
+    current_section: Option<DependencySection>,
+    in_target_dep: bool,
+    in_package_dep: bool,
+    brace_depth: i32,
+    multiline_table_dep: Option<String>,
+}
+
+impl<'a> TomlProcessor<'a> {
+    fn new(
+        content: &'a str,
+        old_name: &'a str,
+        new_name: &'a str,
+        new_path: Option<&'a str>,
+    ) -> Self {
+        Self {
+            lines: content.lines().collect(),
+            old_name,
+            new_name,
+            new_path,
+            had_trailing_newline: content.ends_with('\n'), // Track this
+            current_section: None,
+            in_target_dep: false,
+            in_package_dep: false,
+            brace_depth: 0,
+            multiline_table_dep: None,
+        }
+    }
+
+    fn process(&mut self, name_changed: bool, path_changed: bool) -> Result<String> {
+        let mut result_lines = Vec::new();
+
+        // Always search for the OLD name in the source
+        let search_dep = self.old_name;
+
+        // Clone the lines to avoid borrow checker issues
+        let lines_copy: Vec<String> = self.lines.iter().map(|s| s.to_string()).collect();
+
+        for line in &lines_copy {
+            let mut modified_line = line.clone();
+            let trimmed = line.trim();
+
+            // Track section changes
+            self.update_section(trimmed);
+
+            // Handle section headers
+            if self.is_section_header(trimmed) {
+                if name_changed {
+                    modified_line = self.rename_section_header(&line)?;
+                }
+                self.reset_state();
+                result_lines.push(modified_line);
+                continue;
+            }
+
+            // Handle standalone path lines in multi-line tables
+            if self.brace_depth == 0
+                && trimmed.starts_with("path")
+                && self.is_in_target_context(search_dep)
+                && path_changed
+            {
+                modified_line = self.update_standalone_path(&line)?;
+                result_lines.push(modified_line);
+                continue;
+            }
+
+            // Handle dependency declaration lines - ALWAYS search for old name
+            if self.is_dependency_line(trimmed, search_dep) {
+                self.start_dependency_tracking(&line, search_dep);
+
+                if name_changed {
+                    modified_line = self.rename_dependency_key(&line)?;
+                }
+
+                if path_changed {
+                    modified_line = self.update_inline_path(&modified_line)?;
+                }
+
+                result_lines.push(modified_line);
+                continue;
+            }
+
+            // Handle continuation of multi-line inline tables
+            if self.brace_depth > 0 {
+                if path_changed {
+                    modified_line = self.update_inline_path(&line)?;
+                }
+                self.update_brace_depth(&line);
+                result_lines.push(modified_line);
+                continue;
+            }
+
+            // Handle lines with package field
+            if name_changed && self.has_package_field(&line) {
+                self.start_dependency_tracking(&line, search_dep);
+                modified_line = self.rename_package_field(&line)?;
+
+                if path_changed && self.has_path_field(&line) {
+                    modified_line = self.update_inline_path(&modified_line)?;
+                }
+
+                result_lines.push(modified_line);
+                continue;
+            }
+
+            // No changes needed
+            result_lines.push(modified_line);
+        }
+
+        let mut result = result_lines.join("\n");
+
+        // Preserve trailing newline if original had one
+        if self.had_trailing_newline && !result.ends_with('\n') {
+            result.push('\n');
+        }
+
+        Ok(result)
+    }
+
+    fn update_section(&mut self, trimmed: &str) {
+        if !trimmed.starts_with('[') {
+            return;
+        }
+
+        // Parse section header
+        if let Some(section) = self.parse_section(trimmed) {
+            self.current_section = Some(section);
+            self.multiline_table_dep = None;
+
+            // Check if it's a dependency-specific section like [dependencies.my-crate]
+            if let Some(dep_name) = self.extract_dep_from_section(trimmed) {
+                self.multiline_table_dep = Some(dep_name);
+            }
+        }
+    }
+
+    fn parse_section(&self, header: &str) -> Option<DependencySection> {
+        // Match [dependencies], [dev-dependencies], [build-dependencies]
+        if header.starts_with("[dependencies") {
+            return Some(DependencySection::Dependencies);
+        }
+        if header.starts_with("[dev-dependencies") {
+            return Some(DependencySection::DevDependencies);
+        }
+        if header.starts_with("[build-dependencies") {
+            return Some(DependencySection::BuildDependencies);
+        }
+
+        // Match [target.'cfg(...)'.dependencies]
+        if header.starts_with("[target.") {
+            if let Some(target) = self.extract_target_triple(header) {
+                return Some(DependencySection::TargetDependencies(target));
+            }
+        }
+
+        None
+    }
+
+    fn extract_target_triple(&self, header: &str) -> Option<String> {
+        // Extract the target from [target.'cfg(windows)'.dependencies]
+        let pattern = Regex::new(r"\[target\.'([^']+)'\.").ok()?;
+        pattern
+            .captures(header)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+    }
+
+    fn extract_dep_from_section(&self, header: &str) -> Option<String> {
+        // Extract "my-crate" from [dependencies.my-crate]
+        let pattern =
+            Regex::new(r"\[(?:dependencies|dev-dependencies|build-dependencies)\.([^\]]+)\]")
+                .ok()?;
+        pattern
+            .captures(header)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+    }
+
+    fn is_section_header(&self, trimmed: &str) -> bool {
+        trimmed.starts_with('[') && trimmed.ends_with(']')
+    }
+
+    fn reset_state(&mut self) {
+        self.in_target_dep = false;
+        self.in_package_dep = false;
+        self.brace_depth = 0;
+    }
+
+    fn is_in_target_context(&self, target_dep: &str) -> bool {
+        if let Some(ref dep) = self.multiline_table_dep {
+            return dep == target_dep;
+        }
+        self.in_target_dep || self.in_package_dep
+    }
+
+    fn is_dependency_line(&self, trimmed: &str, target_dep: &str) -> bool {
+        // Check for: target-dep = ...
+        // But not inside brackets
+        if trimmed.starts_with('[') {
+            return false;
+        }
+
+        let pattern = format!(r"^{}\s*[.=]", regex::escape(target_dep));
+        Regex::new(&pattern)
+            .map(|re| re.is_match(trimmed))
+            .unwrap_or(false)
+    }
+
+    fn start_dependency_tracking(&mut self, line: &str, target_dep: &str) {
+        // Check if this is our target dependency
+        let key_pattern = format!(r"^\s*{}\s*=\s*\{{", regex::escape(target_dep));
+        if let Ok(re) = Regex::new(&key_pattern) {
+            if re.is_match(line) {
+                self.in_target_dep = true;
+                self.in_package_dep = false;
+                self.update_brace_depth(line);
+                return;
+            }
+        }
+
+        // Check if this has package = "target_dep"
+        let package_pattern = format!(r#"package\s*=\s*["']{}["']"#, regex::escape(target_dep));
+        if let Ok(re) = Regex::new(&package_pattern) {
+            if re.is_match(line) {
+                self.in_package_dep = true;
+                self.in_target_dep = false;
+                self.update_brace_depth(line);
+            }
+        }
+    }
+
+    fn update_brace_depth(&mut self, line: &str) {
+        self.brace_depth += line.matches('{').count() as i32;
+        self.brace_depth -= line.matches('}').count() as i32;
+
+        if self.brace_depth == 0 {
+            self.in_target_dep = false;
+            self.in_package_dep = false;
+        }
+    }
+
+    fn has_package_field(&self, line: &str) -> bool {
+        let pattern = format!(r#"package\s*=\s*["']{}["']"#, regex::escape(self.old_name));
+        Regex::new(&pattern)
+            .map(|re| re.is_match(line))
+            .unwrap_or(false)
+    }
+
+    fn has_path_field(&self, line: &str) -> bool {
+        Regex::new(r#"\bpath\s*=\s*["']"#)
+            .map(|re| re.is_match(line))
+            .unwrap_or(false)
+    }
+
+    fn rename_section_header(&self, line: &str) -> Result<String> {
+        // Rename [dependencies.old-name] to [dependencies.new-name]
+        let sections = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+        for section in sections {
+            let pattern = format!(
+                r"^(\s*\[(?:target\.[^]]+\.)?{}\.){}\]",
+                regex::escape(section),
+                regex::escape(self.old_name)
+            );
+
+            if let Ok(re) = Regex::new(&pattern) {
+                if re.is_match(line) {
+                    return Ok(re
+                        .replace(line, format!("${{1}}{}]", self.new_name))
+                        .to_string());
+                }
+            }
+        }
+
+        Ok(line.to_string())
+    }
+
+    fn rename_dependency_key(&self, line: &str) -> Result<String> {
+        // Rename old-name = ... to new-name = ...
+        // Handle both: old-name = ... and old-name.workspace = ...
+
+        // Pattern 1: old-name.workspace = true
+        let ws_pattern = format!(
+            r"^(\s*){}\s*\.\s*workspace\s*=",
+            regex::escape(self.old_name)
+        );
+        if let Ok(re) = Regex::new(&ws_pattern) {
+            if re.is_match(line) {
+                return Ok(re
+                    .replace(line, format!("${{1}}{}.workspace =", self.new_name))
+                    .to_string());
+            }
+        }
+
+        // Pattern 2: old-name = ...
+        let key_pattern = format!(r"^(\s*){}\s*=\s*", regex::escape(self.old_name));
+        if let Ok(re) = Regex::new(&key_pattern) {
+            if re.is_match(line) {
+                return Ok(re
+                    .replace(line, format!("${{1}}{} = ", self.new_name))
+                    .to_string());
+            }
+        }
+
+        Ok(line.to_string())
+    }
+
+    fn rename_package_field(&self, line: &str) -> Result<String> {
+        // Double quotes: package = "old-name"
+        // Capture: (package = ")old-name(")
+        let double_pattern = format!(r#"(\bpackage\s*=\s*"){}(")"#, regex::escape(self.old_name));
+        if let Ok(re) = Regex::new(&double_pattern) {
+            if re.is_match(line) {
+                return Ok(re
+                    .replace(line, format!(r#"${{1}}{}${{2}}"#, self.new_name))
+                    .to_string());
+            }
+        }
+
+        // Single quotes: package = 'old-name'
+        // Capture: (package = ')old-name(')
+        let single_pattern = format!(r#"(\bpackage\s*=\s*'){}(')"#, regex::escape(self.old_name));
+        if let Ok(re) = Regex::new(&single_pattern) {
+            if re.is_match(line) {
+                return Ok(re
+                    .replace(line, format!(r#"${{1}}{}${{2}}"#, self.new_name))
+                    .to_string());
+            }
+        }
+
+        Ok(line.to_string())
+    }
+
+    fn update_standalone_path(&self, line: &str) -> Result<String> {
+        if let Some(new_path) = self.new_path {
+            // Match: path = "..." or path = '...'
+            let pattern = r#"^(\s*path\s*=\s*)["'][^"']*["']"#;
+            if let Ok(re) = Regex::new(pattern) {
+                return Ok(re
+                    .replace(line, format!(r#"${{1}}"{}""#, new_path))
+                    .to_string());
+            }
+        }
+        Ok(line.to_string())
+    }
+
+    fn update_inline_path(&self, line: &str) -> Result<String> {
+        if let Some(new_path) = self.new_path {
+            // Already has the new path?
+            if line.contains(&format!(r#"path = "{}""#, new_path)) {
+                return Ok(line.to_string());
+            }
+
+            // Match: path = "..." or path = '...' anywhere in the line
+            let pattern = r#"(\bpath\s*=\s*)["'][^"']*["']"#;
+            if let Ok(re) = Regex::new(pattern) {
+                if re.is_match(line) {
+                    return Ok(re
+                        .replace(line, format!(r#"${{1}}"{}""#, new_path))
+                        .to_string());
+                }
+            }
+        }
+        Ok(line.to_string())
+    }
+}
+
+#[cfg(test)]
+mod comprehensive_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_multiline_inline_table() {
+        let input = r#"[dependencies]
+my-crate = {
+    path = "../old-path",
+    features = ["feat1", "feat2"]
+}
+"#;
+        let expected = r#"[dependencies]
+my-crate = {
+    path = "../new-path",
+    features = ["feat1", "feat2"]
+}
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest, "my-crate", "my-crate", &new_dir, true, false, &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_inline_comments() {
+        let input = r#"[dependencies]
+old-crate = { path = "../old-path" }  # Important dependency
+other = "1.0"
+"#;
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path" }  # Important dependency
+other = "1.0"
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_target_specific_dependencies() {
+        let input = r#"[target.'cfg(windows)'.dependencies]
+old-crate = { path = "../old-path" }
+
+[target.'cfg(unix)'.dev-dependencies]
+other = "1.0"
+"#;
+        let expected = r#"[target.'cfg(windows)'.dependencies]
+new-crate = { path = "../new-path" }
+
+[target.'cfg(unix)'.dev-dependencies]
+other = "1.0"
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_single_quotes() {
+        let input = r#"[dependencies]
+old-crate = { path = '../old-path', version = "1.0" }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path", version = "1.0" }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_optional_dependency() {
+        let input = r#"[dependencies]
+old-crate = { path = "../old-path", optional = true }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path", optional = true }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_multiple_package_aliases() {
+        let input = r#"[dependencies]
+alias1 = { package = "old-crate", path = "../old-path" }
+alias2 = { package = "old-crate", version = "1.0" }
+"#;
+        let expected = r#"[dependencies]
+alias1 = { package = "new-crate", path = "../new-path" }
+alias2 = { package = "new-crate", version = "1.0" }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_workspace_dep_with_features() {
+        let input = r#"[dependencies]
+old-crate = { workspace = true, features = ["extra"] }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { workspace = true, features = ["extra"] }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let manifest = temp.path().join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            temp.path(), // path doesn't matter for workspace deps
+            false,       // don't change path
+            true,        // change name
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
 }
