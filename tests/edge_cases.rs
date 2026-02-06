@@ -1,5 +1,3 @@
-//! Complex scenarios and edge cases
-
 mod common;
 
 use std::fs;

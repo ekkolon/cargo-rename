@@ -1,5 +1,3 @@
-//! Basic rename operation tests (name only, no directory move)
-
 mod common;
 
 use common::*;

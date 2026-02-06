@@ -1,8 +1,3 @@
-//! Integration tests for cargo-rename
-//!
-//! These tests verify end-to-end behavior by creating real Cargo workspaces
-//! and executing rename operations through the command-line interface.
-
 use assert_cmd::cargo::cargo_bin_cmd;
 use std::fs;
 use std::path::Path;

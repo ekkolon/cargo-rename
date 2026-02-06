@@ -1,14 +1,10 @@
 #![doc = include_str!("../README.md")]
 
-//! # cargo-rename
+//! A tool for renaming Cargo packages, handling all references automatically.
 //!
-//! A tool for renaming packages in Cargo workspaces, handling all references
-//! and dependencies automatically.
+//! ## Usage
 //!
-//! ## Public API
-//!
-//! This library can be used programmatically. The main entry point is:
-//!
+//! Use the main entry point:
 //! ```no_run
 //! # fn main() -> cargo_rename::Result<()> {
 //! cargo_rename::run()?;
@@ -16,22 +12,20 @@
 //! # }
 //! ```
 //!
-//! For direct control over the rename process:
-//!
+//! Or directly control the rename:
 //! ```no_run
-//! # use cargo_rename::steps::rename::RenameArgs;
 //! # fn example() -> cargo_rename::Result<()> {
-//! let args = RenameArgs {
+//! let args = cargo_rename::RenameArgs {
 //!     old_name: "old-crate".into(),
 //!     new_name: "new-crate".into(),
-//!     r#move: None,
+//!     outdir: None,
 //!     manifest_path: None,
 //!     dry_run: false,
 //!     yes: true,
 //!     allow_dirty: false,
 //! };
 //!
-//! cargo_rename::steps::rename::execute(args)?;
+//! cargo_rename::execute(args)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -39,52 +33,34 @@
 //! ## Modules
 //!
 //! - **`cli`**: Command-line argument definitions
-//! - **`steps`**: Orchestration logic for rename operations
+//! - **`steps`**: Orchestration logic
 //! - **`error`**: Error types
-//! - **`fs`**: File system transaction support
-//! - **`cargo`**: Cargo.toml manifest manipulation
+//! - **`fs`**: Transaction support
+//! - **`cargo`**: Manifest manipulation
 //! - **`rewrite`**: Source code rewriting
-//! - **`verify`**: Validation and pre-flight checks
-//!
-//! Most users should use `run()` or `steps::rename::execute()` rather than calling
-//! individual modules directly.
+//! - **`verify`**: Validation checks
 
 pub mod cli;
 pub mod error;
 pub mod steps;
 
-// Internal modules (may change between minor versions)
+// Internal modules
 pub mod cargo;
 pub mod fs;
 pub mod rewrite;
 pub mod verify;
 
 pub use error::{RenameError, Result};
+pub use steps::rename::{RenameArgs, execute};
 
 use clap::Parser;
 use log::LevelFilter;
 
-/// Package version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Main entry point for cargo-rename.
+/// Main entry point.
 ///
-/// Parses command-line arguments, sets up logging, and dispatches to the
-/// appropriate subcommand handler.
-///
-/// # Errors
-///
-/// Returns any error encountered during execution. All errors are of type
-/// `RenameError` and include context for debugging.
-///
-/// # Examples
-///
-/// ```no_run
-/// # fn main() -> cargo_rename::Result<()> {
-/// cargo_rename::run()?;
-/// # Ok(())
-/// # }
-/// ```
+/// Parses CLI args, sets up logging, and executes the rename.
 pub fn run() -> Result<()> {
     let cargo_args = cli::CargoCli::parse();
 
@@ -96,21 +72,9 @@ pub fn run() -> Result<()> {
     }
 }
 
-/// Configures logging based on verbosity flags.
+/// Configures logging verbosity.
 ///
-/// # Levels
-///
-/// - No flags: Error only
-/// - `-v`: Warn
-/// - `-vv`: Info
-/// - `-vvv`: Debug
-/// - `-vvvv`: Trace
-/// - `-q`: Off
-///
-/// # Arguments
-///
-/// - `verbose`: Count of `-v` flags
-/// - `quiet`: Count of `-q` flags (takes precedence)
+/// Levels: `-v` (warn), `-vv` (info), `-vvv` (debug), `-vvvv` (trace), `-q` (off).
 fn setup_logging(verbose: u8, quiet: u8) {
     let log_level = if quiet > 0 {
         LevelFilter::Off
@@ -130,19 +94,13 @@ fn setup_logging(verbose: u8, quiet: u8) {
         .init();
 }
 
-/// Configures colored output based on user preference.
-///
-/// # Arguments
-///
-/// - `choice`: ColorChoice from CLI args (auto, always, never)
+/// Configures colored output.
 fn setup_colors(choice: clap::ColorChoice) {
     use colored::control;
 
     match choice {
         clap::ColorChoice::Always => control::set_override(true),
         clap::ColorChoice::Never => control::set_override(false),
-        clap::ColorChoice::Auto => {
-            // handled by colored crate does this automatically
-        }
+        clap::ColorChoice::Auto => {} // colored crate handles automatically
     }
 }

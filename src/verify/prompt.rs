@@ -1,7 +1,6 @@
 //! User confirmation prompt for rename operations.
 //!
-//! Displays a plan of what will be changed and waits for user confirmation.
-//! Automatically skipped in non-interactive mode or when `--yes` is specified.
+//! Displays a plan and waits for confirmation. Skipped if `--yes` or `--dry-run`.
 
 use crate::error::Result;
 use crate::steps::rename::RenameArgs;
@@ -9,49 +8,33 @@ use cargo_metadata::Metadata;
 use colored::Colorize;
 use std::io::{self, Write};
 
-/// Prompts the user for confirmation before executing the rename.
+/// Prompts user for confirmation before executing rename.
 ///
-/// # Automatic Skip Conditions
+/// ## Automatic Skip
+/// - `--yes` or `--dry-run` flag set
+/// - Non-interactive terminal (Unix only)
 ///
-/// - `--yes` flag is set
-/// - `--dry-run` flag is set (no confirmation needed)
-/// - **Unix only**: stdin is not a TTY (non-interactive terminal)
-///
-/// # Returns
-///
-/// - `Ok(true)` if user confirms or prompt is skipped
-/// - `Ok(false)` if user declines
-///
-/// # Errors
-///
-/// Returns `Err` only on I/O errors reading stdin.
+/// Returns `true` if confirmed or skipped, `false` if declined.
 pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool> {
-    // Skip confirmation if flags are set
     if args.yes || args.dry_run {
         return Ok(true);
     }
 
-    // Check for non-interactive terminal (Unix only)
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        // Safety: isatty only reads file descriptor metadata
         if unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 0 } {
             log::warn!("Non-interactive terminal detected. Use --yes to confirm automatically.");
             return Ok(false);
         }
     }
 
-    // Note: On Windows, non-interactive detection is not implemented.
-    // The prompt will hang if stdin is redirected. Users should use --yes.
-
     let pkg = metadata
         .packages
         .iter()
         .find(|p| p.name == args.old_name)
-        .unwrap(); // Safe: validated in preflight_checks
+        .unwrap();
 
-    // Find dependent packages
     let dependents: Vec<_> = metadata
         .packages
         .iter()
@@ -62,7 +45,6 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
         })
         .collect();
 
-    // Display rename plan
     println!("\n{}", "Rename Plan:".bold().cyan());
     println!(
         "  {} {} → {}",
@@ -71,12 +53,10 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
         args.new_name.green()
     );
 
-    // Operations that will be performed
     println!("  {} Update package name in Cargo.toml", "✓".green());
     println!("  {} Update source code references", "✓".green());
     println!("  {} Update workspace dependencies", "✓".green());
 
-    // Directory move details
     if args.should_move() {
         let old_dir = pkg.manifest_path.parent().unwrap().as_std_path();
         let new_dir = args
@@ -96,7 +76,6 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
         println!("  {} Update workspace members list", "✓".green());
     }
 
-    // List dependent packages
     if !dependents.is_empty() {
         println!(
             "  {} Update {} dependent package{}",
@@ -116,7 +95,6 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
 
     println!();
 
-    // Prompt for user input
     print!("{} {} ", "Continue?".bold(), "(y/N)".dimmed());
     io::stdout().flush()?;
 

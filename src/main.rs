@@ -1,7 +1,4 @@
-//! Binary entry point for the `cargo-rename` command-line tool.
-//!
-//! This thin wrapper calls into the library's `run()` function and handles
-//! process exit codes.
+//! Binary entry point for `cargo-rename`.
 
 use std::process;
 

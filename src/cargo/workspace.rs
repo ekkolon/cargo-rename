@@ -1,8 +1,10 @@
 //! Workspace-level `Cargo.toml` updates.
 //!
-//! Handles updates to workspace manifests including:
+//! Updates workspace manifests when a package is renamed or moved:
 //! - `[workspace.members]` array
-//! - `[workspace.dependencies]` table
+//! - `[workspace.dependencies]` keys and paths
+//!
+//! Preserves quote styles and normalizes paths to forward slashes.
 
 use crate::error::Result;
 use crate::fs::transaction::Transaction;
@@ -10,42 +12,14 @@ use regex::Regex;
 use std::fs;
 use std::path::Path;
 
-/// Updates workspace-level manifest when a package is renamed or moved.
+/// Updates workspace manifest when a package is renamed or moved.
 ///
-/// This function handles three types of updates:
+/// Handles three updates:
+/// 1. Workspace members: `[workspace.members]` paths
+/// 2. Dependency key: `old-name = ...` → `new-name = ...`
+/// 3. Dependency path: `path = "..."` within definition
 ///
-/// 1. **Workspace members**: Updates paths in `[workspace.members]` array
-/// 2. **Dependency key**: Renames `old-name = ...` to `new-name = ...` in `[workspace.dependencies]`
-/// 3. **Dependency path**: Updates `path = "..."` within the dependency definition
-///
-/// # Arguments
-///
-/// - `root_path`: Path to workspace `Cargo.toml`
-/// - `old_name`: Current package name
-/// - `new_name`: New package name
-/// - `old_dir`: Current package directory (absolute path)
-/// - `new_dir`: New package directory (absolute path)
-/// - `should_update_members`: Whether to update `[workspace.members]`
-/// - `path_changed`: Whether the directory path changed
-/// - `name_changed`: Whether the package name changed
-///
-/// # Format Handling
-///
-/// Handles both single and double quotes:
-/// ```toml
-/// members = ["path/to/crate", 'other/crate']
-/// [workspace.dependencies]
-/// my-crate = { path = "crates/my-crate" }
-/// ```
-///
-/// # Path Normalization
-///
-/// All paths are normalized to forward slashes (`/`) regardless of platform.
-///
-/// # Errors
-///
-/// - `Io`: Cannot read/write manifest
-/// - `Other`: Path calculation fails
+/// Preserves quote styles (single/double) and normalizes paths to `/`.
 #[allow(clippy::too_many_arguments)]
 pub fn update_workspace_manifest(
     root_path: &Path,
@@ -61,7 +35,6 @@ pub fn update_workspace_manifest(
     let mut content = fs::read_to_string(root_path)?;
     let original = content.clone();
 
-    // Update workspace.members
     if should_update_members {
         let root_dir = root_path.parent().unwrap();
         let old_rel = pathdiff::diff_paths(old_dir, root_dir)

@@ -1,5 +1,3 @@
-//! Directory move operation tests
-
 mod common;
 
 use std::fs;

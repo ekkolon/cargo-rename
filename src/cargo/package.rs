@@ -1,6 +1,6 @@
-//! Package manifest (`Cargo.toml`) updates.
+//! Package manifest updates.
 //!
-//! Handles updates to the `[package]` section of a crate's manifest.
+//! Updates the `[package]` section of a crate's `Cargo.toml`.
 
 use crate::error::Result;
 use crate::fs::transaction::Transaction;
@@ -8,43 +8,9 @@ use std::fs;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, Value};
 
-/// Updates the package name in a crate's `Cargo.toml`.
+/// Updates package name in `Cargo.toml`.
 ///
-/// This modifies the `[package]` section:
-/// ```toml
-/// [package]
-/// name = "new-name"  # ← Updated
-/// version = "0.1.0"
-/// ```
-///
-/// # Guarantees
-///
-/// - Uses `toml_edit` to preserve formatting and comments
-/// - Atomic update via transaction
-/// - Only modifies the `name` field
-///
-/// # Errors
-///
-/// - `Io`: Cannot read manifest file
-/// - `Toml`: Manifest has invalid TOML syntax
-///
-/// # Examples
-///
-/// ```no_run
-/// # use cargo_rename::cargo::package::update_package_name;
-/// # use cargo_rename::fs::transaction::Transaction;
-/// # use std::path::Path;
-/// # fn example() -> cargo_rename::error::Result<()> {
-/// let mut txn = Transaction::new(false);
-/// update_package_name(
-///     Path::new("my-crate/Cargo.toml"),
-///     "new-name",
-///     &mut txn
-/// )?;
-/// txn.commit()?;
-/// # Ok(())
-/// # }
-/// ```
+/// Modifies only the `name` field, preserving formatting and comments.
 pub fn update_package_name(
     manifest_path: &Path,
     new_name: &str,

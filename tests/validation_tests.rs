@@ -1,5 +1,3 @@
-//! Security and validation tests
-
 mod common;
 
 use std::fs;
@@ -32,9 +30,7 @@ fn test_path_traversal_attempts() {
         &["--move", "../../../etc/passwd"],
     )
     .failure()
-    .stderr(predicate::str::contains(
-        "cannot navigate outside workspace",
-    ));
+    .stderr(predicate::str::contains("Contains '..'"));
 
     // Reject ../ pattern
     run_rename(
@@ -44,9 +40,7 @@ fn test_path_traversal_attempts() {
         &["--move", "../../outside"],
     )
     .failure()
-    .stderr(predicate::str::contains(
-        "cannot navigate outside workspace",
-    ));
+    .stderr(predicate::str::contains("Contains '..'"));
 
     // Reject path starting with ..
     run_rename(
@@ -56,9 +50,7 @@ fn test_path_traversal_attempts() {
         &["--move", "../sibling"],
     )
     .failure()
-    .stderr(predicate::str::contains(
-        "cannot navigate outside workspace",
-    ));
+    .stderr(predicate::str::contains("Contains '..'"));
 }
 
 #[test]
@@ -69,12 +61,12 @@ fn test_dot_paths_rejected() {
     // Reject "."
     run_rename(workspace_root, "crate-a", "new-name", &["--move", "."])
         .failure()
-        .stderr(predicate::str::contains("cannot use '.' or '..'"));
+        .stderr(predicate::str::contains("Cannot use '.' or '..'"));
 
     // Reject ".."
     run_rename(workspace_root, "crate-a", "new-name", &["--move", ".."])
         .failure()
-        .stderr(predicate::str::contains("cannot use '.' or '..'"));
+        .stderr(predicate::str::contains("Cannot use '.' or '..'"));
 }
 
 #[test]
@@ -210,7 +202,7 @@ fn test_windows_invalid_characters() {
         let path = format!("bad{}dir", ch);
         run_rename(workspace_root, "crate-a", "moved-crate", &["--move", &path])
             .failure()
-            .stderr(predicate::str::contains("cannot contain character"));
+            .stderr(predicate::str::contains("contains invalid char"));
     }
 }
 

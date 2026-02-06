@@ -114,7 +114,7 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
     validate_package_name(&args.new_name)?;
 
     // Validate directory path (if --move specified)
-    if let Some(Some(custom_path)) = &args.r#move {
+    if let Some(Some(custom_path)) = &args.outdir {
         if let Some(path_str) = custom_path.to_str() {
             validate_directory_path(path_str, metadata.workspace_root.as_std_path())?;
             validate_path_within_workspace(custom_path, metadata.workspace_root.as_std_path())?;

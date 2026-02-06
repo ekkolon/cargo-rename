@@ -1,43 +1,40 @@
-//! Atomic file system operations with automatic rollback.
+//! Atomic file system operations with rollback support.
 //!
-//! This module provides a transaction system for coordinating multiple file operations
-//! (updates and directory moves) that must succeed or fail as a unit.
+//! Coordinates multiple file updates and directory moves that must succeed
+//! or fail as a unit.
 //!
-//! # Execution Guarantees
+//! ## Execution Guarantees
 //!
-//! - **Atomicity**: Either all operations succeed, or all are rolled back
-//! - **Ordering**: File updates execute before directory moves to prevent path resolution issues
-//! - **Validation**: Pre-flight checks run before any mutations occur
-//! - **Idempotency**: Files with unchanged content are automatically skipped
+//! - **Atomicity**: All operations succeed, or all are rolled back
+//! - **Ordering**: File updates before directory moves (prevents path issues)
+//! - **Validation**: Pre-flight checks before any mutations
+//! - **Idempotency**: Files with unchanged content are skipped
 //!
-//! # Execution Phases
+//! ## Phases
 //!
-//! 1. **Building**: Operations are staged via `update_file()` and `move_directory()`
-//! 2. **Validation**: `commit()` validates all operations can succeed (paths exist, writeable, no conflicts)
-//! 3. **Execution**: Operations execute in dependency order:
-//!    - File updates (while still at original paths)
-//!    - Directory moves (after all files updated)
-//! 4. **Rollback** (on failure): Executed operations are reversed in LIFO order
+//! 1. **Build**: Stage operations via `update_file()` and `move_directory()`
+//! 2. **Validate**: Check paths exist, are writable, no conflicts
+//! 3. **Execute**: Apply file updates, then directory moves
+//! 4. **Rollback** (on failure): Reverse operations in LIFO order
 //!
-//! # Example
+//! ## Example
 //!
 //! ```no_run
-//! use cargo_rename::fs::Transaction;
+//! # use cargo_rename::fs::Transaction;
 //! # use std::path::PathBuf;
 //! # fn example() -> cargo_rename::error::Result<()> {
 //! let mut txn = Transaction::new(false);
 //!
-//! // Stage operations
 //! txn.update_file(PathBuf::from("Cargo.toml"), "[package]\nname = \"new\"".into())?;
 //! txn.move_directory(PathBuf::from("old-crate"), PathBuf::from("new-crate"))?;
 //!
-//! // Commit atomically (or rollback on error)
-//! txn.commit()?;
+//! txn.commit()?; // Atomic commit or rollback on error
 //! # Ok(())
 //! # }
 //! ```
 
 use crate::error::{RenameError, Result};
+
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -46,58 +43,51 @@ use std::path::{Path, PathBuf};
 /// A file system operation that can be committed or rolled back.
 #[derive(Debug, Clone)]
 pub enum Operation {
-    /// Update a file's contents.
+    /// Update file contents.
     ///
-    /// Stores both original and new content to enable rollback.
+    /// Stores original content for rollback.
     UpdateFile {
         path: PathBuf,
         original: String,
         new: String,
     },
-    /// Move a directory to a new location.
+    /// Move directory to new location.
     ///
-    /// Handles both same-filesystem (atomic rename) and cross-filesystem (copy+delete) moves.
+    /// Handles atomic rename (same filesystem) and copy+delete (cross-filesystem).
     MoveDirectory { from: PathBuf, to: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionState {
-    /// Operations are being staged, not yet committed.
+    /// Staging operations.
     Building,
-    /// All operations executed successfully.
+    /// All operations succeeded.
     Committed,
-    /// Operations were manually rolled back after commit.
+    /// Manually rolled back after commit.
     RolledBack,
-    /// Commit validation failed; no operations executed.
+    /// Validation failed; nothing executed.
     Failed,
 }
 
-/// A transaction coordinating multiple file system operations.
+/// Transaction coordinating multiple file system operations.
 ///
-/// Must be explicitly committed via `commit()`. If dropped without committing,
-/// a warning is logged but no rollback occurs (since operations weren't applied).
+/// Must be explicitly committed. If dropped without committing, logs a warning
+/// but doesn't roll back (since operations weren't applied).
 ///
-/// # Dry-Run Mode
+/// ## Dry-Run Mode
 ///
-/// When `dry_run = true`, operations are staged and validated but never executed.
-/// Useful for previewing changes.
+/// When `dry_run = true`, operations are validated but not executed.
 #[must_use = "Transaction must be committed or rolled back"]
 pub struct Transaction {
     operations: Vec<Operation>,
     dry_run: bool,
     state: TransactionState,
-    /// Tracks indices of operations that executed successfully (for partial rollback).
     executed_indices: Vec<usize>,
-    /// Maps old directory paths to new paths (not used during staging; reserved for future features).
     path_redirects: HashMap<PathBuf, PathBuf>,
 }
 
 impl Transaction {
     /// Creates a new transaction.
-    ///
-    /// # Arguments
-    ///
-    /// - `dry_run`: If true, operations are validated but not executed
     pub fn new(dry_run: bool) -> Self {
         Self {
             operations: Vec::new(),
@@ -108,17 +98,13 @@ impl Transaction {
         }
     }
 
-    /// Validates all staged operations can succeed.
+    /// Validates all staged operations.
     ///
-    /// Checks performed:
+    /// Checks:
     /// - No duplicate file operations
-    /// - All source paths exist
-    /// - Files are writable (not read-only)
-    /// - Target directories don't already exist
-    ///
-    /// # Errors
-    ///
-    /// Returns the first validation error encountered. Does not modify file system.
+    /// - Source paths exist
+    /// - Files are writable
+    /// - Target directories don't exist
     fn validate(&self) -> Result<()> {
         let mut file_paths = HashSet::new();
         let mut dir_moves = HashMap::new();
@@ -140,13 +126,13 @@ impl Transaction {
                         )));
                     }
 
-                    if let Ok(metadata) = fs::metadata(path)
-                        && metadata.permissions().readonly()
-                    {
-                        return Err(RenameError::Io(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("File is read-only: {}", path.display()),
-                        )));
+                    if let Ok(metadata) = fs::metadata(path) {
+                        if metadata.permissions().readonly() {
+                            return Err(RenameError::Io(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                format!("File is read-only: {}", path.display()),
+                            )));
+                        }
                     }
                 }
                 Operation::MoveDirectory { from, to } => {
@@ -166,12 +152,12 @@ impl Transaction {
             }
         }
 
-        // Log (but don't error on) files inside directories being moved
+        // Log files inside directories being moved (not an error)
         for file_path in &file_paths {
             for (from, to) in &dir_moves {
                 if file_path.starts_with(from) {
                     log::debug!(
-                        "File {} will be moved with directory {} → {}",
+                        "File {} will move with directory {} → {}",
                         file_path.display(),
                         from.display(),
                         to.display()
@@ -191,19 +177,17 @@ impl Transaction {
         self.operations.is_empty()
     }
 
-    /// Returns true if transaction has been successfully committed.
+    /// Returns true if successfully committed.
     pub fn is_committed(&self) -> bool {
         self.state == TransactionState::Committed
     }
 
-    /// Returns a human-readable preview of staged operations.
+    /// Returns human-readable preview of operations.
     pub fn preview(&self) -> Vec<String> {
         self.operations
             .iter()
             .map(|op| match op {
-                Operation::UpdateFile { path, .. } => {
-                    format!("Update: {}", path.display())
-                }
+                Operation::UpdateFile { path, .. } => format!("Update: {}", path.display()),
                 Operation::MoveDirectory { from, to } => {
                     format!("Move: {} → {}", from.display(), to.display())
                 }
@@ -211,16 +195,16 @@ impl Transaction {
             .collect()
     }
 
-    /// Prints a categorized summary of operations to stdout.
+    /// Prints categorized summary to stdout.
     ///
-    /// Groups operations into:
+    /// Groups:
     /// - Package manifests (renamed package's Cargo.toml)
-    /// - Dependencies (other Cargo.toml files)
-    /// - Source code (.rs files)
-    /// - Documentation (.md, .txt files)
+    /// - Dependencies (other Cargo.toml)
+    /// - Source code (.rs)
+    /// - Documentation (.md, .txt)
     /// - Directory moves
     ///
-    /// Paths are displayed relative to `workspace_root` with forward slashes.
+    /// Paths are relative to `workspace_root` with forward slashes.
     pub fn print_summary(&self, old_name: &str, new_name: &str, workspace_root: &Path) {
         if self.operations.is_empty() {
             println!("\n{}", "No changes needed".yellow());
@@ -439,27 +423,15 @@ impl Drop for Transaction {
     fn drop(&mut self) {
         if self.state == TransactionState::Building && !self.operations.is_empty() && !self.dry_run
         {
-            log::warn!("Transaction dropped without commit - changes were not applied");
+            log::warn!("Transaction dropped without commit");
         }
     }
 }
 
 impl Transaction {
-    /// Stages a directory move operation.
+    /// Stages a directory move.
     ///
-    /// The move is not executed until `commit()` is called. Directory moves
-    /// execute after all file updates to prevent path resolution issues.
-    ///
-    /// # Arguments
-    ///
-    /// - `from`: Source directory (must exist)
-    /// - `to`: Destination directory (must not exist)
-    ///
-    /// # Errors
-    ///
-    /// - `DirectoryExists`: Target path already exists
-    /// - `Io(NotFound)`: Source directory doesn't exist
-    /// - `Other`: Transaction already committed/rolled back
+    /// Not executed until `commit()`. Moves execute after all file updates.
     pub fn move_directory(&mut self, from: PathBuf, to: PathBuf) -> Result<()> {
         if self.state != TransactionState::Building {
             return Err(RenameError::Other(anyhow::anyhow!(
@@ -487,20 +459,10 @@ impl Transaction {
         Ok(())
     }
 
-    /// Stages a file update operation.
+    /// Stages a file update.
     ///
-    /// Reads the current file content and compares it to `new_content`. If identical,
-    /// the operation is skipped (idempotent). Otherwise, the update is staged for commit.
-    ///
-    /// # Arguments
-    ///
-    /// - `path`: File to update (must exist and be readable)
-    /// - `new_content`: New file content
-    ///
-    /// # Errors
-    ///
-    /// - `Io`: File doesn't exist or isn't readable
-    /// - `Other`: Transaction already committed/rolled back
+    /// Reads current content and compares to `new_content`. If identical,
+    /// skips (idempotent). Otherwise stages for commit.
     pub fn update_file(&mut self, path: PathBuf, new_content: String) -> Result<()> {
         if self.state != TransactionState::Building {
             return Err(RenameError::Other(anyhow::anyhow!(
@@ -508,10 +470,10 @@ impl Transaction {
             )));
         }
 
-        log::debug!("Transaction::update_file called for: {}", path.display());
+        log::debug!("Staging update for: {}", path.display());
 
         let original = fs::read_to_string(&path).map_err(|e| {
-            log::error!("Failed to read file {}: {}", path.display(), e);
+            log::error!("Failed to read {}: {}", path.display(), e);
             RenameError::Io(std::io::Error::new(
                 e.kind(),
                 format!("Failed to read {}: {}", path.display(), e),
@@ -519,14 +481,12 @@ impl Transaction {
         })?;
 
         if original == new_content {
-            log::debug!("File content unchanged, skipping: {}", path.display());
+            log::debug!("Content unchanged, skipping: {}", path.display());
             return Ok(());
         }
 
         if self.dry_run {
             log::info!("Would update: {}", path.display());
-        } else {
-            log::debug!("Staging update for: {}", path.display());
         }
 
         self.operations.push(Operation::UpdateFile {
@@ -535,23 +495,17 @@ impl Transaction {
             new: new_content,
         });
 
-        log::debug!("Transaction now has {} operations", self.operations.len());
         Ok(())
     }
 
     /// Commits all staged operations atomically.
     ///
-    /// Execution order:
-    /// 1. Validate all operations can succeed
-    /// 2. Execute all file updates (while files are at original paths)
-    /// 3. Execute all directory moves (after files updated)
+    /// Order:
+    /// 1. Validate
+    /// 2. Execute file updates (at original paths)
+    /// 3. Execute directory moves
     ///
-    /// If any operation fails, executed operations are rolled back automatically.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first error encountered during validation or execution.
-    /// On execution failure, rollback is attempted automatically.
+    /// On failure, rolls back automatically.
     pub fn commit(&mut self) -> Result<()> {
         if self.state != TransactionState::Building {
             return Err(RenameError::Other(anyhow::anyhow!(
@@ -564,13 +518,13 @@ impl Transaction {
             return Ok(());
         }
 
-        // Phase 1: Validate
+        // Validate
         if let Err(e) = self.validate() {
             self.state = TransactionState::Failed;
             return Err(e);
         }
 
-        // Phase 2: Separate file ops from directory ops
+        // Separate ops by type
         let mut file_ops = Vec::new();
         let mut dir_ops = Vec::new();
 
@@ -581,7 +535,7 @@ impl Transaction {
             }
         }
 
-        // Phase 3: Execute file updates FIRST (while files still at old paths)
+        // Execute file updates FIRST
         for &idx in &file_ops {
             if let Some(Operation::UpdateFile { path, new, .. }) = self.operations.get(idx) {
                 fs::write(path, new).map_err(|e| {
@@ -595,7 +549,7 @@ impl Transaction {
             }
         }
 
-        // Phase 4: Execute directory moves SECOND (after all files updated)
+        // Execute directory moves SECOND
         for &idx in &dir_ops {
             if let Some(Operation::MoveDirectory { from, to }) = self.operations.get(idx) {
                 if let Some(parent) = to.parent() {
@@ -630,13 +584,7 @@ impl Transaction {
 
     /// Manually rolls back a committed transaction.
     ///
-    /// Reverses all executed operations in LIFO order. Only works on committed
-    /// transactions (not building or failed ones).
-    ///
-    /// # Errors
-    ///
-    /// - `RollbackFailed`: One or more operations couldn't be reversed
-    /// - `Other`: Transaction not in a rollback-able state
+    /// Reverses operations in LIFO order. Only works on committed transactions.
     pub fn rollback(&mut self) -> Result<()> {
         match self.state {
             TransactionState::Building => Ok(()),
@@ -654,7 +602,7 @@ impl Transaction {
         }
     }
 
-    /// Rolls back only the operations that were successfully executed.
+    /// Rolls back executed operations only.
     fn rollback_partial(&mut self) -> Result<()> {
         let mut errors = Vec::new();
 
@@ -673,11 +621,7 @@ impl Transaction {
                                 Self::copy_dir_recursive(to, from)
                                     .and_then(|_| fs::remove_dir_all(to).map_err(Into::into))
                                     .map_err(|e| {
-                                        format!(
-                                            "Failed to restore directory {}: {}",
-                                            from.display(),
-                                            e
-                                        )
+                                        format!("Failed to restore {}: {}", from.display(), e)
                                     })
                             }
                         } else {
@@ -694,16 +638,16 @@ impl Transaction {
 
         if errors.is_empty() {
             self.state = TransactionState::RolledBack;
-            log::info!("Rollback completed successfully");
+            log::info!("Rollback completed");
             Ok(())
         } else {
             Err(RenameError::RollbackFailed(errors.join("; ")))
         }
     }
 
-    /// Checks if two paths are on the same filesystem.
+    /// Checks if paths are on same filesystem.
     ///
-    /// Used to determine if an atomic `rename()` is possible, or if a cross-filesystem
+    /// Determines if atomic `rename()` is possible, or if cross-filesystem
     /// copy+delete is required.
     fn is_same_filesystem(path1: &Path, path2: &Path) -> Result<bool> {
         #[cfg(unix)]
@@ -728,7 +672,7 @@ impl Transaction {
         }
     }
 
-    /// Recursively copies a directory tree.
+    /// Recursively copies directory tree.
     fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
 
@@ -749,7 +693,7 @@ impl Transaction {
     }
 }
 
-/// Statistics about operations in a transaction.
+/// Statistics about transaction operations.
 #[derive(Debug, Clone, Copy)]
 pub struct TransactionStats {
     pub files_updated: usize,
@@ -758,7 +702,7 @@ pub struct TransactionStats {
 }
 
 impl Transaction {
-    /// Returns statistics about staged operations.
+    /// Returns operation statistics.
     pub fn stats(&self) -> TransactionStats {
         let mut files_updated = 0;
         let mut dirs_moved = 0;

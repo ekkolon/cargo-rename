@@ -1,72 +1,55 @@
 //! Dependency reference updates in `Cargo.toml` files.
 //!
-//! This module handles the complex task of updating dependency declarations
-//! when a package is renamed or moved. It supports all Cargo dependency formats
-//! including inline tables, multi-line tables, target-specific dependencies,
-//! and workspace inheritance.
+//! Updates dependency declarations when a package is renamed or moved.
+//! Supports all Cargo dependency formats via a line-by-line state machine.
 //!
-//! # Supported Formats
+//! ## Supported Formats
 //!
-//! ## Inline Tables
 //! ```toml
-//! [dependencies]
+//! # Inline table
 //! my-crate = { path = "../my-crate", version = "0.1" }
-//! ```
 //!
-//! ## Multi-Line Inline Tables
-//! ```toml
+//! # Multi-line inline table
 //! my-crate = {
 //!     path = "../my-crate",
-//!     features = ["feat1", "feat2"]
+//!     features = ["feat1"]
 //! }
-//! ```
 //!
-//! ## Multi-Line Tables
-//! ```toml
+//! # Multi-line table
 //! [dependencies.my-crate]
 //! path = "../my-crate"
 //! features = ["feat1"]
-//! ```
 //!
-//! ## Target-Specific
-//! ```toml
+//! # Target-specific
 //! [target.'cfg(windows)'.dependencies]
 //! my-crate = { path = "../my-crate" }
 //!
-//! [target.x86_64-unknown-linux-gnu.dependencies]
-//! my-crate = { path = "../my-crate" }
-//! ```
-//!
-//! ## Package Renames
-//! ```toml
+//! # Package rename
 //! alias = { package = "my-crate", path = "../my-crate" }
-//! ```
 //!
-//! ## Workspace Inheritance
-//! ```toml
+//! # Workspace inheritance
 //! my-crate = { workspace = true }
 //! ```
 //!
-//! # State Machine
+//! ## State Machine
 //!
-//! `TomlProcessor` is a line-by-line state machine that tracks:
-//!
+//! `TomlProcessor` tracks:
 //! - **Current section**: Which `[dependencies]` section we're in
-//! - **Brace depth**: Whether we're inside a multi-line inline table `{ ... }`
-//! - **Target context**: Whether we're processing the renamed dependency
+//! - **Brace depth**: Whether inside multi-line inline table `{ ... }`
+//! - **Target context**: Whether processing the renamed dependency
 //!
-//! State transitions occur when:
-//! - Section headers are encountered (`[dependencies]`)
-//! - Dependency declarations are found (`my-crate = ...`)
-//! - Braces open/close in inline tables
+//! State transitions on:
+//! - Section headers (`[dependencies]`)
+//! - Dependency declarations (`my-crate = ...`)
+//! - Brace open/close
 //!
-//! # Guarantees
+//! ## Guarantees
 //!
-//! - **Preserves formatting**: Whitespace, indentation, and alignment unchanged
-//! - **Preserves comments**: Both inline (`# comment`) and block comments
-//! - **Preserves trailing newlines**: Files with/without final `\n` remain unchanged
-//! - **Atomic updates**: All changes via transaction, rollback on error
-//! - **Path normalization**: Converts backslashes to forward slashes
+//! - Preserves formatting, indentation, alignment
+//! - Preserves all comments (inline and block)
+//! - Preserves trailing newlines
+//! - Atomic updates via transaction
+//! - Normalizes paths to forward slashes
 
 use crate::error::Result;
 use crate::fs::transaction::Transaction;
@@ -76,44 +59,7 @@ use std::path::Path;
 
 /// Updates dependency references in a package's `Cargo.toml`.
 ///
-/// Scans the manifest for references to `old_name` and updates them to `new_name`
-/// and/or `new_dir`. Handles all dependency formats (see module docs).
-///
-/// # Arguments
-///
-/// - `manifest_path`: Path to the dependent package's `Cargo.toml`
-/// - `old_name`: Current name of the dependency
-/// - `new_name`: New name of the dependency
-/// - `new_dir`: New directory of the dependency (absolute path)
-/// - `path_changed`: Whether the dependency's directory changed
-/// - `name_changed`: Whether the dependency's name changed
-///
-/// # Errors
-///
-/// - `Io`: Cannot read manifest file
-/// - `Other`: Regex compilation failure (indicates bug in patterns)
-///
-/// # Examples
-///
-/// ```no_run
-/// # use cargo_rename::cargo::dependency::update_dependent_manifest;
-/// # use cargo_rename::fs::Transaction;
-/// # use std::path::Path;
-/// # fn example() -> cargo_rename::error::Result<()> {
-/// let mut txn = Transaction::new(false);
-/// update_dependent_manifest(
-///     Path::new("app/Cargo.toml"),
-///     "old-lib",
-///     "new-lib",
-///     Path::new("/workspace/new-lib"),
-///     true,  // path changed
-///     true,  // name changed
-///     &mut txn
-/// )?;
-/// txn.commit()?;
-/// # Ok(())
-/// # }
-/// ```
+/// Scans for references to `old_name` and updates to `new_name` and/or `new_dir`.
 pub fn update_dependent_manifest(
     manifest_path: &Path,
     old_name: &str,
@@ -133,7 +79,6 @@ pub fn update_dependent_manifest(
 
     log::debug!("Updating dependent manifest: {}", manifest_path.display());
 
-    // Calculate new relative path once
     let new_path_str = if path_changed {
         let rel_path = pathdiff::diff_paths(new_dir, manifest_dir)
             .ok_or_else(|| anyhow::anyhow!("Failed to calculate relative path"))?;
@@ -147,9 +92,9 @@ pub fn update_dependent_manifest(
 
     if new_content != original {
         txn.update_file(manifest_path.to_path_buf(), new_content)?;
-        log::debug!("Updated dependent manifest: {}", manifest_path.display());
+        log::debug!("Updated: {}", manifest_path.display());
     } else {
-        log::debug!("No changes needed for: {}", manifest_path.display());
+        log::debug!("No changes: {}", manifest_path.display());
     }
 
     Ok(())
@@ -160,7 +105,7 @@ enum DependencySection {
     Dependencies,
     DevDependencies,
     BuildDependencies,
-    TargetDependencies(String), // e.g., "cfg(windows)"
+    TargetDependencies(String),
 }
 
 struct TomlProcessor<'a> {
@@ -168,9 +113,9 @@ struct TomlProcessor<'a> {
     old_name: &'a str,
     new_name: &'a str,
     new_path: Option<&'a str>,
-    had_trailing_newline: bool, // Add this
+    had_trailing_newline: bool,
 
-    // State tracking
+    // State
     current_section: Option<DependencySection>,
     in_target_dep: bool,
     in_package_dep: bool,
@@ -190,7 +135,7 @@ impl<'a> TomlProcessor<'a> {
             old_name,
             new_name,
             new_path,
-            had_trailing_newline: content.ends_with('\n'), // Track this
+            had_trailing_newline: content.ends_with('\n'),
             current_section: None,
             in_target_dep: false,
             in_package_dep: false,
@@ -201,21 +146,15 @@ impl<'a> TomlProcessor<'a> {
 
     fn process(&mut self, name_changed: bool, path_changed: bool) -> Result<String> {
         let mut result_lines = Vec::new();
-
-        // Always search for the OLD name in the source
         let search_dep = self.old_name;
-
-        // Clone the lines to avoid borrow checker issues
         let lines_copy: Vec<String> = self.lines.iter().map(|s| s.to_string()).collect();
 
         for line in &lines_copy {
             let mut modified_line = line.clone();
             let trimmed = line.trim();
 
-            // Track section changes
             self.update_section(trimmed);
 
-            // Handle section headers
             if self.is_section_header(trimmed) {
                 if name_changed {
                     modified_line = self.rename_section_header(line)?;
@@ -225,7 +164,7 @@ impl<'a> TomlProcessor<'a> {
                 continue;
             }
 
-            // Handle standalone path lines in multi-line tables
+            // Standalone path line in multi-line table
             if self.brace_depth == 0
                 && trimmed.starts_with("path")
                 && self.is_in_target_context(search_dep)
@@ -236,14 +175,13 @@ impl<'a> TomlProcessor<'a> {
                 continue;
             }
 
-            // Handle dependency declaration lines - always search for old name
+            // Dependency declaration
             if self.is_dependency_line(trimmed, search_dep) {
                 self.start_dependency_tracking(line, search_dep);
 
                 if name_changed {
                     modified_line = self.rename_dependency_key(line)?;
                 }
-
                 if path_changed {
                     modified_line = self.update_inline_path(&modified_line)?;
                 }
@@ -252,7 +190,7 @@ impl<'a> TomlProcessor<'a> {
                 continue;
             }
 
-            // Handle continuation of multi-line inline tables
+            // Continuation of multi-line inline table
             if self.brace_depth > 0 {
                 if path_changed {
                     modified_line = self.update_inline_path(line)?;
@@ -262,7 +200,7 @@ impl<'a> TomlProcessor<'a> {
                 continue;
             }
 
-            // Handle lines with package field
+            // Lines with package field
             if name_changed && self.has_package_field(line) {
                 self.start_dependency_tracking(line, search_dep);
                 modified_line = self.rename_package_field(line)?;
@@ -275,13 +213,11 @@ impl<'a> TomlProcessor<'a> {
                 continue;
             }
 
-            // No changes needed
             result_lines.push(modified_line);
         }
 
         let mut result = result_lines.join("\n");
 
-        // Preserve trailing newline if original had one
         if self.had_trailing_newline && !result.ends_with('\n') {
             result.push('\n');
         }
@@ -294,12 +230,10 @@ impl<'a> TomlProcessor<'a> {
             return;
         }
 
-        // Parse section header
         if let Some(section) = self.parse_section(trimmed) {
             self.current_section = Some(section);
             self.multiline_table_dep = None;
 
-            // Check if it's a dependency-specific section like [dependencies.my-crate]
             if let Some(dep_name) = self.extract_dep_from_section(trimmed) {
                 self.multiline_table_dep = Some(dep_name);
             }
@@ -307,7 +241,6 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn parse_section(&self, header: &str) -> Option<DependencySection> {
-        // Match [dependencies], [dev-dependencies], [build-dependencies]
         if header.starts_with("[dependencies") {
             return Some(DependencySection::Dependencies);
         }
@@ -318,7 +251,6 @@ impl<'a> TomlProcessor<'a> {
             return Some(DependencySection::BuildDependencies);
         }
 
-        // Match [target.'cfg(...)'.dependencies]
         if header.starts_with("[target.")
             && let Some(target) = self.extract_target_triple(header)
         {
@@ -329,25 +261,24 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn extract_target_triple(&self, header: &str) -> Option<String> {
-        // Try quoted first: [target.'cfg(windows)'.dependencies]
-        let quoted_pattern = Regex::new(r"\[target\.'([^']+)'\.").ok()?;
-        if let Some(caps) = quoted_pattern.captures(header) {
+        // Quoted: [target.'cfg(windows)'.dependencies]
+        let quoted = Regex::new(r"\[target\.'([^']+)'\.").ok()?;
+        if let Some(caps) = quoted.captures(header) {
             return caps.get(1).map(|m| m.as_str().to_string());
         }
 
-        // Try unquoted: [target.x86_64-unknown-linux-gnu.dependencies]
-        let unquoted_pattern = Regex::new(
+        // Unquoted: [target.x86_64-unknown-linux-gnu.dependencies]
+        let unquoted = Regex::new(
             r"\[target\.([^.\]]+)\.(?:dependencies|dev-dependencies|build-dependencies)\]",
         )
         .ok()?;
-        unquoted_pattern
+        unquoted
             .captures(header)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
     }
 
     fn extract_dep_from_section(&self, header: &str) -> Option<String> {
-        // Extract "my-crate" from [dependencies.my-crate]
         let pattern =
             Regex::new(r"\[(?:dependencies|dev-dependencies|build-dependencies)\.([^\]]+)\]")
                 .ok()?;
@@ -375,8 +306,6 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn is_dependency_line(&self, trimmed: &str, target_dep: &str) -> bool {
-        // Check for: target-dep = ...
-        // But not inside brackets
         if trimmed.starts_with('[') {
             return false;
         }
@@ -388,7 +317,6 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn start_dependency_tracking(&mut self, line: &str, target_dep: &str) {
-        // Check if this is our target dependency
         let key_pattern = format!(r"^\s*{}\s*=\s*\{{", regex::escape(target_dep));
         if let Ok(re) = Regex::new(&key_pattern)
             && re.is_match(line)
@@ -399,7 +327,6 @@ impl<'a> TomlProcessor<'a> {
             return;
         }
 
-        // Check if this has package = "target_dep"
         let package_pattern = format!(r#"package\s*=\s*["']{}["']"#, regex::escape(target_dep));
         if let Ok(re) = Regex::new(&package_pattern)
             && re.is_match(line)
@@ -434,12 +361,11 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn rename_section_header(&self, line: &str) -> Result<String> {
-        // Rename [dependencies.old-name] to [dependencies.new-name]
         let sections = ["dependencies", "dev-dependencies", "build-dependencies"];
 
         for section in sections {
             let pattern = format!(
-                r"^(\s*\[(?:target\.[^]]+\.)?{}\.){}\]",
+                r"^(\s*\[(?:target\.[^]]+\.)?{}\.){}]",
                 regex::escape(section),
                 regex::escape(self.old_name)
             );
@@ -458,10 +384,7 @@ impl<'a> TomlProcessor<'a> {
 
     fn rename_dependency_key(&self, line: &str) -> Result<String> {
         // old-name.workspace = true
-        let ws_pattern = format!(
-            r"^(\s*){}\s*\.\s*workspace\s*=",
-            regex::escape(self.old_name)
-        );
+        let ws_pattern = format!(r"^(\s*){}\.workspace\s*=", regex::escape(self.old_name));
         if let Ok(re) = Regex::new(&ws_pattern)
             && re.is_match(line)
         {
@@ -484,10 +407,9 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn rename_package_field(&self, line: &str) -> Result<String> {
-        // Double quotes: package = "old-name"
-        // Captures (package = ")old-name(")
-        let double_pattern = format!(r#"(\bpackage\s*=\s*"){}(")"#, regex::escape(self.old_name));
-        if let Ok(re) = Regex::new(&double_pattern)
+        // Double quotes
+        let double = format!(r#"(\bpackage\s*=\s*"){}(")"#, regex::escape(self.old_name));
+        if let Ok(re) = Regex::new(&double)
             && re.is_match(line)
         {
             return Ok(re
@@ -495,10 +417,9 @@ impl<'a> TomlProcessor<'a> {
                 .to_string());
         }
 
-        // Single quotes: package = 'old-name'
-        // Captures (package = ')old-name(')
-        let single_pattern = format!(r#"(\bpackage\s*=\s*'){}(')"#, regex::escape(self.old_name));
-        if let Ok(re) = Regex::new(&single_pattern)
+        // Single quotes
+        let single = format!(r#"(\bpackage\s*=\s*'){}(')"#, regex::escape(self.old_name));
+        if let Ok(re) = Regex::new(&single)
             && re.is_match(line)
         {
             return Ok(re
@@ -511,7 +432,6 @@ impl<'a> TomlProcessor<'a> {
 
     fn update_standalone_path(&self, line: &str) -> Result<String> {
         if let Some(new_path) = self.new_path {
-            // Match: path = "..." or path = '...'
             let pattern = r#"^(\s*path\s*=\s*)["'][^"']*["']"#;
             if let Ok(re) = Regex::new(pattern) {
                 return Ok(re
@@ -524,12 +444,10 @@ impl<'a> TomlProcessor<'a> {
 
     fn update_inline_path(&self, line: &str) -> Result<String> {
         if let Some(new_path) = self.new_path {
-            // Already has the new path?
             if line.contains(&format!(r#"path = "{}""#, new_path)) {
                 return Ok(line.to_string());
             }
 
-            // Match path = "..." or path = '...' anywhere in the line
             let pattern = r#"(\bpath\s*=\s*)["'][^"']*["']"#;
             if let Ok(re) = Regex::new(pattern)
                 && re.is_match(line)
