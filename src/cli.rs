@@ -8,7 +8,12 @@ use clap::{ColorChoice, Parser, Subcommand};
 ///
 /// Usage: `cargo rename old-name new-name`
 #[derive(Parser)]
-#[command(name = "cargo-rename", bin_name = "cargo", version)]
+#[command(
+    name = "cargo-rename",
+    bin_name = "cargo",
+    version,
+    propagate_version = true
+)]
 #[command(styles = clap_cargo::style::CLAP_STYLING)]
 pub struct CargoCli {
     #[command(subcommand)]
