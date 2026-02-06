@@ -111,7 +111,7 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
 /// are made during validation.
 pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
     // Validate new package name
-    validate_package_name(&args.effective_new_name())?;
+    validate_package_name(args.effective_new_name())?;
 
     // Validate directory path (if --move specified)
     if let Some(Some(custom_path)) = &args.outdir {
