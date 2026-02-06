@@ -6,13 +6,19 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+/// Maximum allowed package name length (Cargo's limit)
+const MAX_PACKAGE_NAME_LENGTH: usize = 64;
+
 /// Validates a package name according to Cargo's naming rules.
 ///
 /// Rules:
 /// - Must start with an ASCII letter or underscore
 /// - Can only contain ASCII alphanumerics, hyphens, and underscores
 /// - Cannot be empty
+/// - Cannot exceed 64 characters
 /// - Cannot be a reserved name (test, doc, build, bench)
+/// - Cannot start or end with hyphen
+/// - Should not conflict with existing crates.io normalization
 ///
 /// Errors:
 /// Returns `RenameError::InvalidName` if validation fails.
@@ -25,6 +31,18 @@ pub fn validate_package_name(name: &str) -> Result<()> {
         ));
     }
 
+    // Check length
+    if name.len() > MAX_PACKAGE_NAME_LENGTH {
+        return Err(RenameError::InvalidName(
+            name.to_string(),
+            format!(
+                "exceeds maximum length of {} characters (has {})",
+                MAX_PACKAGE_NAME_LENGTH,
+                name.len()
+            ),
+        ));
+    }
+
     // Check first character is ASCII letter or underscore
     let first_char = name.chars().next().unwrap(); // Safe: we checked non-empty
     if !first_char.is_ascii_alphabetic() && first_char != '_' {
@@ -34,8 +52,18 @@ pub fn validate_package_name(name: &str) -> Result<()> {
         ));
     }
 
-    // Check all characters are valid
+    // Check all characters are valid (ASCII only)
     for (idx, ch) in name.chars().enumerate() {
+        if !ch.is_ascii() {
+            return Err(RenameError::InvalidName(
+                name.to_string(),
+                format!(
+                    "contains non-ASCII character '{}' at position {}. Only ASCII characters are allowed",
+                    ch, idx
+                ),
+            ));
+        }
+
         if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' {
             return Err(RenameError::InvalidName(
                 name.to_string(),
@@ -60,7 +88,7 @@ pub fn validate_package_name(name: &str) -> Result<()> {
         ));
     }
 
-    // Additional checks for common mistakes
+    // Check for hyphens at start/end
     if name.starts_with('-') {
         return Err(RenameError::InvalidName(
             name.to_string(),
@@ -75,7 +103,16 @@ pub fn validate_package_name(name: &str) -> Result<()> {
         ));
     }
 
+    // Check for consecutive hyphens (bad practice)
+    if name.contains("--") {
+        log::warn!(
+            "Package name '{}' contains consecutive hyphens, which may cause confusion",
+            name
+        );
+    }
+
     // Warn about potential crates.io conflicts
+    // On crates.io, my-crate and my_crate are considered the SAME package
     if name.contains('_') && name.contains('-') {
         log::warn!(
             "Package name '{}' contains both underscores and hyphens. This is valid but may cause confusion.",
@@ -83,25 +120,30 @@ pub fn validate_package_name(name: &str) -> Result<()> {
         );
     }
 
+    // Warn about naming convention
+    if name.chars().any(|c| c.is_ascii_uppercase()) {
+        log::warn!(
+            "Package name '{}' contains uppercase letters. By convention, package names should be lowercase with hyphens.",
+            name
+        );
+    }
+
     Ok(())
 }
-
-// src/validation.rs
 
 /// Validates a directory name/path for the --move flag
 ///
 /// Rules:
 /// - Cannot be empty
 /// - Cannot contain invalid path characters
-/// - Cannot be an absolute path (must be relative)
-/// - Cannot navigate outside workspace (no ../..)
+/// - Must be relative (not absolute)
+/// - Cannot navigate outside workspace
 /// - Cannot be just "." or ".."
+/// - Must not contain path traversal sequences
 ///
 /// Errors:
 /// Returns `RenameError::InvalidName` if validation fails.
 pub fn validate_directory_name(name: &str) -> Result<()> {
-    use std::path::Path;
-
     if name.is_empty() {
         return Err(RenameError::InvalidName(
             name.to_string(),
@@ -120,12 +162,21 @@ pub fn validate_directory_name(name: &str) -> Result<()> {
     }
 
     // Additional check: Unix-style absolute paths on Windows
+    // Also check for UNC paths
     #[cfg(windows)]
     {
         if name.starts_with('/') || name.starts_with('\\') {
             return Err(RenameError::InvalidName(
                 name.to_string(),
                 "directory must be a relative path, not absolute".to_string(),
+            ));
+        }
+
+        // Check for UNC paths: \\server\share
+        if name.starts_with(r"\\") {
+            return Err(RenameError::InvalidName(
+                name.to_string(),
+                "UNC paths are not allowed".to_string(),
             ));
         }
     }
@@ -138,13 +189,30 @@ pub fn validate_directory_name(name: &str) -> Result<()> {
         ));
     }
 
-    // Check for parent directory traversal attempts
-    // Need to check both Unix and Windows separators
-    if name.contains("../") || name.contains("..\\") || name.starts_with("..") {
-        return Err(RenameError::InvalidName(
-            name.to_string(),
-            "cannot navigate outside workspace using '..'".to_string(),
-        ));
+    // Check each path component for parent directory traversal
+    use std::path::Component;
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(RenameError::InvalidName(
+                    name.to_string(),
+                    "cannot navigate outside workspace using '..'".to_string(),
+                ));
+            }
+            Component::CurDir => {
+                // Allow current dir in middle of path: "foo/./bar" is valid
+            }
+            Component::Normal(_) => {
+                // Normal path component is fine
+            }
+            _ => {
+                // Prefix, RootDir should have been caught by is_absolute check
+                return Err(RenameError::InvalidName(
+                    name.to_string(),
+                    "invalid path component".to_string(),
+                ));
+            }
+        }
     }
 
     // Check for null bytes (security)
@@ -177,19 +245,35 @@ pub fn validate_directory_name(name: &str) -> Result<()> {
         ];
 
         for component in path.components() {
-            if let Some(component_str) = component.as_os_str().to_str() {
-                // Extract just the name without extension for reserved name check
-                let name_part = if let Some(dot_pos) = component_str.rfind('.') {
-                    &component_str[..dot_pos]
-                } else {
-                    component_str
-                };
+            if let Component::Normal(os_str) = component {
+                if let Some(component_str) = os_str.to_str() {
+                    // Extract just the name without extension for reserved name check
+                    let name_part = if let Some(dot_pos) = component_str.rfind('.') {
+                        &component_str[..dot_pos]
+                    } else {
+                        component_str
+                    };
 
-                let name_upper = name_part.to_uppercase();
-                if RESERVED.contains(&name_upper.as_str()) {
+                    let name_upper = name_part.to_uppercase();
+                    if RESERVED.contains(&name_upper.as_str()) {
+                        return Err(RenameError::InvalidName(
+                            name.to_string(),
+                            format!("'{}' is a reserved name on Windows", component_str),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for trailing dots or spaces (Windows issue, but good practice everywhere)
+    for component in path.components() {
+        if let Component::Normal(os_str) = component {
+            if let Some(s) = os_str.to_str() {
+                if s.ends_with('.') || s.ends_with(' ') {
                     return Err(RenameError::InvalidName(
                         name.to_string(),
-                        format!("'{}' is a reserved name on Windows", component_str),
+                        format!("path component '{}' cannot end with '.' or space", s),
                     ));
                 }
             }
@@ -198,10 +282,42 @@ pub fn validate_directory_name(name: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Validates that directory path is within workspace bounds
+pub fn validate_directory_within_workspace(dir_path: &Path, workspace_root: &Path) -> Result<()> {
+    // Construct the full path
+    let full_path = workspace_root.join(dir_path);
+
+    // Try to canonicalize to resolve any .. or symlinks
+    // Note: This might fail if path doesn't exist yet, which is OK
+    if let Ok(canonical) = full_path.canonicalize() {
+        let canonical_workspace = workspace_root.canonicalize().map_err(|e| {
+            RenameError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to canonicalize workspace root: {}", e),
+            ))
+        })?;
+
+        if !canonical.starts_with(&canonical_workspace) {
+            return Err(RenameError::InvalidName(
+                dir_path.display().to_string(),
+                "resolved path is outside workspace".to_string(),
+            ));
+        }
+    } else {
+        // Path doesn't exist yet - check components manually
+        // Just ensure it doesn't have .. that would escape
+        // (already checked in validate_directory_name)
+    }
+
+    Ok(())
+}
+
 /// Checks if the git working directory has uncommitted changes.
 ///
 /// Behavior:
-/// - Returns error if workspace has uncommitted changes
+/// - Returns error if workspace has uncommitted **tracked** changes
+/// - Ignores untracked files (new files that aren't in git)
 /// - Returns Ok if workspace is clean
 /// - Returns Ok if not a git repository (fails silently)
 /// - Returns Ok if git is not installed (fails silently)
@@ -235,8 +351,9 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
     }
 
     // Check for uncommitted changes
+    // Using -uno to ignore untracked files
     match Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "-uno"]) // -uno = don't show untracked files
         .current_dir(workspace_root)
         .output()
     {
@@ -249,7 +366,7 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
                         status.lines().take(5).map(|line| line.trim()).collect();
 
                     log::warn!("Uncommitted changes detected:");
-                    for file in modified_files {
+                    for file in &modified_files {
                         log::warn!("  {}", file);
                     }
                     if status.lines().count() > 5 {
@@ -264,12 +381,12 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
                     "Git status command failed: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
-                Ok(())
+                Ok(()) // Fail silently
             }
         }
         Err(e) => {
             log::warn!("Failed to execute git status: {}", e);
-            Ok(())
+            Ok(()) // Fail silently
         }
     }
 }
@@ -280,9 +397,10 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
 /// 1. Validates new package name
 /// 2. Validates directory name (if --move is specified)
 /// 3. Verifies old package exists
-/// 4. Checks new name differs from old name
+/// 4. Checks new name differs from old name (if not moving)
 /// 5. Checks target directory doesn't already exist (if moving)
-/// 6. Checks git status (unless --allow-dirty)
+/// 6. Validates directory is within workspace bounds
+/// 7. Checks git status (unless --allow-dirty)
 ///
 /// Errors:
 /// Returns first error encountered during checks.
@@ -294,6 +412,10 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
     if let Some(Some(custom_path)) = &args.r#move {
         if let Some(path_str) = custom_path.to_str() {
             validate_directory_name(path_str)?;
+            validate_directory_within_workspace(
+                custom_path,
+                metadata.workspace_root.as_std_path(),
+            )?;
         } else {
             return Err(RenameError::InvalidName(
                 custom_path.display().to_string(),
@@ -303,19 +425,20 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
     }
 
     // 3. Verify old package exists
-    let pkg = metadata
+    let _pkg = metadata
         .packages
         .iter()
         .find(|p| p.name == args.old_name)
         .ok_or_else(|| RenameError::PackageNotFound(args.old_name.clone()))?;
 
     // 4. Check git status (unless --allow-dirty)
-    if !args.allow_dirty
-        && let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
+    if !args.allow_dirty {
+        if let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
             log::error!("{}", e);
             log::info!("Hint: Use --allow-dirty to bypass this check");
             return Err(e);
         }
+    }
 
     // 5. Additional safety check: ensure new name differs from old name
     if args.old_name == args.new_name && !args.should_move() {
@@ -327,20 +450,22 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
 
     // 6. Check if target directory would conflict (if moving)
     if args.should_move() {
-        let old_dir = pkg.manifest_path.parent().unwrap();
         let new_dir = args
-            .calculate_new_dir(old_dir.as_std_path(), metadata.workspace_root.as_std_path())
+            .calculate_new_dir(metadata.workspace_root.as_std_path())
             .unwrap();
 
+        // Note: This is a TOCTOU check - directory could be created between now and commit
+        // The Transaction will perform a final check atomically
         if new_dir.exists() {
             return Err(RenameError::DirectoryExists(new_dir.to_path_buf()));
         }
 
         // Additional check: ensure parent directory exists or can be created
-        if let Some(parent) = new_dir.parent()
-            && !parent.exists() {
+        if let Some(parent) = new_dir.parent() {
+            if !parent.exists() {
                 log::info!("Parent directory '{}' will be created", parent.display());
             }
+        }
     }
 
     Ok(())
@@ -351,7 +476,7 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
 /// Behavior:
 /// - Skips prompt if --yes or --dry-run flag is set
 /// - Shows detailed plan of changes
-/// - Waits for user input
+/// - Waits for user input (with timeout on non-interactive terminals)
 ///
 /// Returns:
 /// - Ok(true) if user confirms or prompt is skipped
@@ -361,6 +486,16 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
     // Skip confirmation if flags are set
     if args.yes || args.dry_run {
         return Ok(true);
+    }
+
+    // Check if stdin is a terminal (not redirected)
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if !unsafe { libc::isatty(std::io::stdin().as_raw_fd()) != 0 } {
+            log::warn!("Non-interactive terminal detected. Use --yes to confirm automatically.");
+            return Ok(false);
+        }
     }
 
     let pkg = metadata
@@ -381,7 +516,7 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
         .collect();
 
     // Display rename plan
-    println!("{}", "Rename Plan:".bold().cyan());
+    println!("\n{}", "Rename Plan:".bold().cyan());
     println!(
         "  {} {} → {}",
         "Package:".bold(),
@@ -398,7 +533,7 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
     if args.should_move() {
         let old_dir = pkg.manifest_path.parent().unwrap();
         let new_dir = args
-            .calculate_new_dir(old_dir.as_std_path(), metadata.workspace_root.as_std_path())
+            .calculate_new_dir(metadata.workspace_root.as_std_path())
             .unwrap();
         let old_dir_name = old_dir.file_name().unwrap().to_string();
         let new_dir_relative = new_dir
@@ -497,6 +632,21 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_length_limit() {
+        let too_long = "a".repeat(65);
+        assert!(validate_package_name(&too_long).is_err());
+
+        let max_length = "a".repeat(64);
+        assert!(validate_package_name(&max_length).is_ok());
+    }
+
+    #[test]
+    fn test_validate_non_ascii() {
+        assert!(validate_package_name("café").is_err());
+        assert!(validate_package_name("テスト").is_err());
+    }
+
+    #[test]
     fn test_validate_directory_names() {
         // Valid directory names
         assert!(validate_directory_name("my-dir").is_ok());
@@ -510,6 +660,7 @@ mod tests {
         assert!(validate_directory_name("..").is_err());
         assert!(validate_directory_name("../../../etc/passwd").is_err());
         assert!(validate_directory_name("crates/../secrets").is_err());
+        assert!(validate_directory_name("foo/../bar").is_err()); // Any .. component
 
         // Absolute paths
         assert!(validate_directory_name("/absolute/path").is_err());
@@ -517,6 +668,7 @@ mod tests {
         #[cfg(windows)]
         {
             assert!(validate_directory_name("C:\\absolute").is_err());
+            assert!(validate_directory_name("\\\\server\\share").is_err()); // UNC path
             assert!(validate_directory_name("CON").is_err());
             assert!(validate_directory_name("PRN").is_err());
             assert!(validate_directory_name("dir<name").is_err());
@@ -533,5 +685,11 @@ mod tests {
 
         // Should not error on non-git directory
         assert!(check_git_status(temp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_consecutive_hyphens() {
+        // Should succeed but warn
+        assert!(validate_package_name("my--crate").is_ok());
     }
 }

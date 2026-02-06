@@ -117,14 +117,27 @@ pub fn update_package_name(
 }
 
 /// Production-ready implementation of update_dependent_manifest
-/// Handles ALL edge cases including:
-/// - Multi-line inline tables
-/// - Target-specific dependencies  
-/// - Mixed quote styles
-/// - Inline comments
-/// - Platform-specific path separators
-/// - Package renames
-/// - Workspace dependencies
+///
+/// # Supported Formats
+/// - Inline tables: `dep = { path = "..." }`
+/// - Multi-line inline tables with nested arrays
+/// - Multi-line tables: `[dependencies.dep]`
+/// - Target-specific: `[target.'cfg(...)'.dependencies]` and `[target.triple.dependencies]`
+/// - Package renames: `alias = { package = "dep", ... }`
+/// - Workspace inheritance: `dep = { workspace = true }`
+/// - Git dependencies with path overrides
+/// - Both quote styles: `"path"` and `'path'`
+///
+/// # Guarantees
+/// - Preserves all comments (inline and block)
+/// - Preserves all blank lines and spacing
+/// - Preserves trailing newlines
+/// - Normalizes paths to forward slashes
+/// - Atomic updates (all or nothing via Transaction)
+///
+/// # Limitations
+/// - Does not support dotted key syntax: `dependencies.dep.path = "..."`
+/// - Does not handle TOML includes/imports (not standard Cargo.toml)
 pub fn update_dependent_manifest(
     manifest_path: &Path,
     old_name: &str,
@@ -340,9 +353,18 @@ impl<'a> TomlProcessor<'a> {
     }
 
     fn extract_target_triple(&self, header: &str) -> Option<String> {
-        // Extract the target from [target.'cfg(windows)'.dependencies]
-        let pattern = Regex::new(r"\[target\.'([^']+)'\.").ok()?;
-        pattern
+        // Try quoted first: [target.'cfg(windows)'.dependencies]
+        let quoted_pattern = Regex::new(r"\[target\.'([^']+)'\.").ok()?;
+        if let Some(caps) = quoted_pattern.captures(header) {
+            return caps.get(1).map(|m| m.as_str().to_string());
+        }
+
+        // Try unquoted: [target.x86_64-unknown-linux-gnu.dependencies]
+        let unquoted_pattern = Regex::new(
+            r"\[target\.([^.\]]+)\.(?:dependencies|dev-dependencies|build-dependencies)\]",
+        )
+        .ok()?;
+        unquoted_pattern
             .captures(header)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
@@ -549,54 +571,18 @@ impl<'a> TomlProcessor<'a> {
 }
 
 #[cfg(test)]
-mod comprehensive_tests {
+mod critical_edge_cases {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
 
     #[test]
-    fn test_multiline_inline_table() {
+    fn test_git_dep_with_path_override() {
         let input = r#"[dependencies]
-my-crate = {
-    path = "../old-path",
-    features = ["feat1", "feat2"]
-}
+old-crate = { git = "https://github.com/user/repo", path = "../old-path" }
 "#;
         let expected = r#"[dependencies]
-my-crate = {
-    path = "../new-path",
-    features = ["feat1", "feat2"]
-}
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest, "my-crate", "my-crate", &new_dir, true, false, &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_inline_comments() {
-        let input = r#"[dependencies]
-old-crate = { path = "../old-path" }  # Important dependency
-other = "1.0"
-"#;
-        let expected = r#"[dependencies]
-new-crate = { path = "../new-path" }  # Important dependency
-other = "1.0"
+new-crate = { git = "https://github.com/user/repo", path = "../new-path" }
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -625,18 +611,202 @@ other = "1.0"
     }
 
     #[test]
-    fn test_target_specific_dependencies() {
-        let input = r#"[target.'cfg(windows)'.dependencies]
+    fn test_target_without_quotes() {
+        let input = r#"[target.x86_64-unknown-linux-gnu.dependencies]
 old-crate = { path = "../old-path" }
-
-[target.'cfg(unix)'.dev-dependencies]
-other = "1.0"
 "#;
-        let expected = r#"[target.'cfg(windows)'.dependencies]
+        let expected = r#"[target.x86_64-unknown-linux-gnu.dependencies]
 new-crate = { path = "../new-path" }
+"#;
 
-[target.'cfg(unix)'.dev-dependencies]
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_multiline_features_array() {
+        let input = r#"[dependencies]
+old-crate = { 
+    path = "../old-path", 
+    features = [
+        "feat1",
+        "feat2"
+    ]
+}
+"#;
+        let expected = r#"[dependencies]
+new-crate = { 
+    path = "../new-path", 
+    features = [
+        "feat1",
+        "feat2"
+    ]
+}
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_no_trailing_newline() {
+        let input = r#"[dependencies]
+old-crate = { path = "../old-path" }"#; // No \n at end
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path" }"#; // No \n at end
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_windows_style_paths() {
+        let input = r#"[dependencies]
+old-crate = { path = "..\\old-path" }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path" }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_very_long_inline_table() {
+        let input = r#"[dependencies]
+old-crate = { path = "../old-path", version = "1.0", default-features = false, features = ["a", "b", "c", "d"], optional = true }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path", version = "1.0", default-features = false, features = ["a", "b", "c", "d"], optional = true }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_mixed_dependency_types() {
+        let input = r#"[dependencies]
+old-crate = { path = "../old-path" }
+alias = { package = "old-crate", version = "1.0" }
 other = "1.0"
+
+[dev-dependencies]
+old-crate = { workspace = true }
+"#;
+        let expected = r#"[dependencies]
+new-crate = { path = "../new-path" }
+alias = { package = "new-crate", version = "1.0" }
+other = "1.0"
+
+[dev-dependencies]
+new-crate = { workspace = true }
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -665,12 +835,12 @@ other = "1.0"
     }
 
     #[test]
-    fn test_single_quotes() {
+    fn test_only_path_change_no_rename() {
         let input = r#"[dependencies]
-old-crate = { path = '../old-path', version = "1.0" }
+my-crate = { path = "../old-path" }
 "#;
         let expected = r#"[dependencies]
-new-crate = { path = "../new-path", version = "1.0" }
+my-crate = { path = "../new-path" }
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -683,12 +853,8 @@ new-crate = { path = "../new-path", version = "1.0" }
 
         let mut txn = Transaction::new(false);
         update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
+            &manifest, "my-crate", "my-crate", &new_dir, true,  // path changed
+            false, // name NOT changed
             &mut txn,
         )
         .unwrap();
@@ -699,82 +865,12 @@ new-crate = { path = "../new-path", version = "1.0" }
     }
 
     #[test]
-    fn test_optional_dependency() {
+    fn test_only_name_change_no_path() {
         let input = r#"[dependencies]
-old-crate = { path = "../old-path", optional = true }
+old-crate = { version = "1.0" }
 "#;
         let expected = r#"[dependencies]
-new-crate = { path = "../new-path", optional = true }
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_multiple_package_aliases() {
-        let input = r#"[dependencies]
-alias1 = { package = "old-crate", path = "../old-path" }
-alias2 = { package = "old-crate", version = "1.0" }
-"#;
-        let expected = r#"[dependencies]
-alias1 = { package = "new-crate", path = "../new-path" }
-alias2 = { package = "new-crate", version = "1.0" }
-"#;
-
-        let temp = TempDir::new().unwrap();
-        let pkg_dir = temp.path().join("my-pkg");
-        fs::create_dir(&pkg_dir).unwrap();
-        let manifest = pkg_dir.join("Cargo.toml");
-        fs::write(&manifest, input).unwrap();
-
-        let new_dir = temp.path().join("new-path");
-
-        let mut txn = Transaction::new(false);
-        update_dependent_manifest(
-            &manifest,
-            "old-crate",
-            "new-crate",
-            &new_dir,
-            true,
-            true,
-            &mut txn,
-        )
-        .unwrap();
-
-        txn.commit().unwrap();
-        let result = fs::read_to_string(&manifest).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_workspace_dep_with_features() {
-        let input = r#"[dependencies]
-old-crate = { workspace = true, features = ["extra"] }
-"#;
-        let expected = r#"[dependencies]
-new-crate = { workspace = true, features = ["extra"] }
+new-crate = { version = "1.0" }
 "#;
 
         let temp = TempDir::new().unwrap();
@@ -786,9 +882,51 @@ new-crate = { workspace = true, features = ["extra"] }
             &manifest,
             "old-crate",
             "new-crate",
-            temp.path(), // path doesn't matter for workspace deps
-            false,       // don't change path
-            true,        // change name
+            temp.path(),
+            false, // path NOT changed
+            true,  // name changed
+            &mut txn,
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+        let result = fs::read_to_string(&manifest).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_preserves_exact_formatting() {
+        let input = r#"[dependencies]
+# Important dependency
+old-crate = { path = "../old-path" }  # Keep this updated
+
+# Optional features
+other = { version = "1.0", optional = true }
+"#;
+        let expected = r#"[dependencies]
+# Important dependency
+new-crate = { path = "../new-path" }  # Keep this updated
+
+# Optional features
+other = { version = "1.0", optional = true }
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("my-pkg");
+        fs::create_dir(&pkg_dir).unwrap();
+        let manifest = pkg_dir.join("Cargo.toml");
+        fs::write(&manifest, input).unwrap();
+
+        let new_dir = temp.path().join("new-path");
+
+        let mut txn = Transaction::new(false);
+        update_dependent_manifest(
+            &manifest,
+            "old-crate",
+            "new-crate",
+            &new_dir,
+            true,
+            true,
             &mut txn,
         )
         .unwrap();

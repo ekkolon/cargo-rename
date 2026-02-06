@@ -7,12 +7,30 @@ use std::{fs, path::Path};
 
 /// Updates Rust source files and documentation to reflect a crate rename.
 ///
-/// Guarantees:
+/// # Supported Contexts
+/// - Use statements (all variants)
+/// - Extern crate declarations
+/// - Qualified paths (::)
+/// - Attributes and derives
+/// - Doc comment intra-doc links
+/// - Raw identifiers (r#)
+/// - Standalone macros (old_crate_macro!)
+/// - Generic bounds and trait implementations
+/// - Type aliases and associated types
+/// - Markdown documentation
+///
+/// # Guarantees
 /// - Preserves all formatting, comments, and whitespace
-/// - Handles all Rust syntax contexts (use, paths, attributes, docs)
+/// - Handles all Rust syntax contexts
 /// - Never mutates files that aren't using the old crate name
 /// - Honors .gitignore, .ignore, and .git/info/exclude
 /// - Idempotent
+/// - Validates Rust syntax before modifying
+///
+/// # Known Limitations
+/// - Does not modify feature names in #[cfg(feature = "name")]
+/// - Does not modify string literals (intentional)
+/// - Does not process files that fail syn parsing
 pub fn update_source_code(
     metadata: &Metadata,
     old_name: &str,
@@ -78,7 +96,7 @@ impl RenamePatterns {
         ));
 
         // 4. Qualified paths: old_crate::path
-        // This handles function calls, types, constants, macros
+        // This handles function calls, types, constants, macros, UFCS, trait bounds
         replacements.push((
             Regex::new(&format!(r"\b{old}(::)", old = old_escaped))?,
             format!("{new}${{1}}", new = new_snake),
@@ -96,19 +114,39 @@ impl RenamePatterns {
             format!("${{1}}{new}${{2}}", new = new_snake),
         ));
 
-        // 7. Doc comment intra-doc links: [`old_crate::Type`] or [`old_crate`]
+        // 7. Attribute with parentheses: #[old_crate(...)]
+        replacements.push((
+            Regex::new(&format!(r"(#\[){old}(\()", old = old_escaped))?,
+            format!("${{1}}{new}${{2}}", new = new_snake),
+        ));
+
+        // 8. Doc comment intra-doc links: [`old_crate::Type`] or [`old_crate`]
         replacements.push((
             Regex::new(&format!(r"(\[`){old}(`\]|::)", old = old_escaped))?,
             format!("${{1}}{new}${{2}}", new = new_snake),
         ));
 
-        // 8. Use with self: use old_crate::{self
+        // 9. Use with self: use old_crate::{self
         replacements.push((
             Regex::new(&format!(
                 r"(\buse\s+){old}(::)\{{(\s*self\b)",
                 old = old_escaped
             ))?,
             format!("${{1}}{new}${{2}}{{${{3}}", new = new_snake),
+        ));
+
+        // 10. Raw identifiers: r#old_crate
+        replacements.push((
+            Regex::new(&format!(r"\br#{old}\b", old = old_escaped))?,
+            format!("r#{new}", new = new_snake),
+        ));
+
+        // 11. Standalone macro invocations: old_crate_something!
+        // Matches macros that start with crate name followed by underscore
+        // This is a common pattern for crate-specific macros
+        replacements.push((
+            Regex::new(&format!(r"\b{old}(_[a-z_][a-z0-9_]*!)", old = old_escaped))?,
+            format!("{new}${{1}}", new = new_snake),
         ));
 
         Ok(Self {
@@ -142,9 +180,10 @@ fn walk_package(root: &Path, patterns: &RenamePatterns, txn: &mut Transaction) -
         .git_global(true)
         .filter_entry(|e| {
             if let Some(ft) = e.file_type()
-                && !ft.is_dir() {
-                    return true;
-                }
+                && !ft.is_dir()
+            {
+                return true;
+            }
             !matches!(e.file_name().to_str(), Some("target") | Some(".git"))
         })
         .build();
@@ -266,6 +305,7 @@ mod tests {
                 "#[derive(old_crate::Derive)]",
                 "#[derive(new_crate::Derive)]",
             ),
+            ("#[old_crate(arg)]", "#[new_crate(arg)]"),
             // Doc comments with intra-doc links
             ("/// See [`old_crate::Type`]", "/// See [`new_crate::Type`]"),
             ("/// [`old_crate`] is great", "/// [`new_crate`] is great"),
@@ -279,6 +319,87 @@ mod tests {
             (
                 "use old_crate::{\n    module1,\n    module2\n};",
                 "use new_crate::{\n    module1,\n    module2\n};",
+            ),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = patterns.apply(input);
+            assert_eq!(
+                result.as_deref(),
+                Some(expected),
+                "Failed for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_raw_identifiers() {
+        let patterns = RenamePatterns::new("old_crate", "new_crate").unwrap();
+
+        let test_cases = vec![
+            ("use r#old_crate::module;", "use r#new_crate::module;"),
+            ("r#old_crate::function()", "r#new_crate::function()"),
+            ("extern crate r#old_crate;", "extern crate r#new_crate;"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = patterns.apply(input);
+            assert_eq!(
+                result.as_deref(),
+                Some(expected),
+                "Failed for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_standalone_macros() {
+        let patterns = RenamePatterns::new("old_crate", "new_crate").unwrap();
+
+        let test_cases = vec![
+            ("old_crate_println!()", "new_crate_println!()"),
+            ("old_crate_macro!(args)", "new_crate_macro!(args)"),
+            ("old_crate_format!(\"test\")", "new_crate_format!(\"test\")"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = patterns.apply(input);
+            assert_eq!(
+                result.as_deref(),
+                Some(expected),
+                "Failed for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_complex_type_contexts() {
+        let patterns = RenamePatterns::new("old_crate", "new_crate").unwrap();
+
+        let test_cases = vec![
+            // UFCS (Universal Function Call Syntax)
+            (
+                "<old_crate::Type as Trait>::method()",
+                "<new_crate::Type as Trait>::method()",
+            ),
+            (
+                "<Type as old_crate::Trait>::method()",
+                "<Type as new_crate::Trait>::method()",
+            ),
+            // Generic bounds
+            (
+                "fn foo<T: old_crate::Trait>()",
+                "fn foo<T: new_crate::Trait>()",
+            ),
+            ("where T: old_crate::Trait", "where T: new_crate::Trait"),
+            // Associated types
+            ("type X = old_crate::Assoc;", "type X = new_crate::Assoc;"),
+            (
+                "type Y = <old_crate::Type as Trait>::Assoc;",
+                "type Y = <new_crate::Type as Trait>::Assoc;",
             ),
         ];
 
@@ -310,6 +431,8 @@ mod tests {
             // Different identifiers
             "use old_crate_different::module;",
             "use not_old_crate::module;",
+            // Feature names (intentionally not changed)
+            r#"#[cfg(feature = "old_crate")]"#,
         ];
 
         for input in unchanged {
@@ -356,5 +479,88 @@ fn main() {
 
         let result = patterns.apply(input).unwrap();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_complex_real_world_example() {
+        let patterns = RenamePatterns::new("old_crate", "new_crate").unwrap();
+
+        let input = r#"
+use old_crate::{self, Config};
+use old_crate::prelude::*;
+
+/// See [`old_crate::Type`] for details
+#[derive(old_crate::Derive)]
+#[old_crate(attribute = "value")]
+pub struct MyStruct {
+    config: old_crate::Config,
+}
+
+impl old_crate::Trait for MyStruct {
+    type Assoc = old_crate::AssocType;
+    
+    fn method(&self) -> old_crate::Result<()> {
+        old_crate_println!("test");
+        old_crate::function()?;
+        Ok(())
+    }
+}
+
+fn generic_function<T: old_crate::Bound>() 
+where
+    T: old_crate::OtherTrait,
+{
+    let _ = <T as old_crate::Trait>::method();
+}
+"#;
+
+        let expected = r#"
+use new_crate::{self, Config};
+use new_crate::prelude::*;
+
+/// See [`new_crate::Type`] for details
+#[derive(new_crate::Derive)]
+#[new_crate(attribute = "value")]
+pub struct MyStruct {
+    config: new_crate::Config,
+}
+
+impl new_crate::Trait for MyStruct {
+    type Assoc = new_crate::AssocType;
+    
+    fn method(&self) -> new_crate::Result<()> {
+        new_crate_println!("test");
+        new_crate::function()?;
+        Ok(())
+    }
+}
+
+fn generic_function<T: new_crate::Bound>() 
+where
+    T: new_crate::OtherTrait,
+{
+    let _ = <T as new_crate::Trait>::method();
+}
+"#;
+
+        let result = patterns.apply(input).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_does_not_break_on_partial_matches() {
+        let patterns = RenamePatterns::new("old", "new").unwrap();
+
+        // Should only match word boundaries
+        let unchanged = vec![
+            "use old_crate::module;", // old_crate != old
+            "let older = 5;",         // older != old
+            "use bold::module;",      // bold != old
+        ];
+
+        for input in unchanged {
+            let result = patterns.apply(input);
+            assert_eq!(result, None, "Should not change: {}", input);
+        }
     }
 }
