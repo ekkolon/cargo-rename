@@ -14,15 +14,15 @@ pub struct CargoCli {
     #[command(subcommand)]
     pub command: CargoCommand,
 
-    /// Increase logging verbosity (-v, -vv, -vvv)
+    /// Control color output: auto, always, never
     #[arg(
         long,
-        short = 'v',
-        action = clap::ArgAction::Count,
+        value_name = "WHEN",
+        default_value = "auto",
         global = true,
-        help_heading = "Global Options"
+        display_order = 100
     )]
-    pub verbose: u8,
+    pub color: ColorChoice,
 
     /// Decrease logging verbosity
     #[arg(
@@ -31,19 +31,19 @@ pub struct CargoCli {
         action = clap::ArgAction::Count,
         global = true,
         conflicts_with = "verbose",
-        help_heading = "Global Options"
+        display_order = 101
     )]
     pub quiet: u8,
 
-    /// Control color output: auto, always, never
+    /// Increase logging verbosity (-v, -vv, -vvv)
     #[arg(
         long,
-        value_name = "WHEN",
-        default_value = "auto",
+        short = 'v',
+        action = clap::ArgAction::Count,
         global = true,
-        help_heading = "Global Options"
+        display_order = 102
     )]
-    pub color: ColorChoice,
+    pub verbose: u8,
 }
 
 #[derive(Subcommand)]
