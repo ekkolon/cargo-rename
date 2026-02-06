@@ -2,10 +2,12 @@
 name = "cargo-rename"
 version = "0.1.2"
 edition = "2024"
+rust-version = "1.86"
 authors = ["Nelson Dominguez <ekkolon@proton.me>"]
-description = "Rename Cargo packages with confidence"
+description = "Perform a coordinated, all-or-nothing rename of a Cargo package"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ekkolon/cargo-rename"
+documentation = "https://docs.rs/cargo-rename"
 keywords = ["cargo", "rename", "refactor", "workspace"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
 include = ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "src/**/*.rs"]
@@ -15,25 +17,33 @@ name = "cargo-rename"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0"
-cargo_metadata = "0.23"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
-colored = "3.1"
-log = "0.4"
-pathdiff = "0.2"
-regex = "1.10"
-thiserror = "2.0"
-toml_edit = "0.23.9"
-walkdir = "2.5"
-syn = { version = "2", features = ["full", "visit-mut"] }
-prettyplease = "0.2"
+clap-cargo = "0.18.3"
+cargo_metadata = "0.23"
+
+syn = { version = "2", features = ["full"] }
+toml_edit = "0.23"
+regex = "1.12"
+
 ignore = "0.4"
+pathdiff = "0.2"
+
+anyhow = "1"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11.8"
+
+colored = "3.1"
+
 
 [dev-dependencies]
 assert_cmd = "2.1"
 predicates = "3.1"
 tempfile = "3.10"
 
-
 [lints.rust]
-unsafe_code = { level = "forbid" }
+unsafe_code = { level = "forbid", priority = 1 }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

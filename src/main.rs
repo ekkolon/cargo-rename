@@ -1,6 +1,10 @@
+//! Binary entry point for `cargo-rename`.
+
+use std::process;
+
 fn main() {
-    if let Err(err) = cargo_rename::run() {
-        eprintln!("{err}");
-        std::process::exit(1);
+    if let Err(e) = cargo_rename::run() {
+        eprintln!("Error: {}", e);
+        process::exit(1);
     }
 }
