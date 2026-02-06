@@ -14,24 +14,62 @@
 //! tracked. If any step fails, the project is automatically restored to its exact
 //! previous state
 //!
-//! ## Quick Start
+//!
+//! ## Installation
 //!
 //! ```bash
 //! cargo install cargo-rename
 //! ```
 //!
+//! ## Usage
+//!
 //! ```bash
-//! # Rename a package and update all references
-//! cargo rename old-name new-name
+//! # Rename the package name only (directory stays the same)
+//! cargo rename old-crate new-crate
 //!
-//! # Rename and move the directory
-//! cargo rename old-name new-name --move
+//! # Move the package directory only (package name unchanged)
+//! cargo rename old-crate --move new-location
 //!
-//! # Rename and move the directory to a new location
-//! cargo rename old-name new-name --move crates/new-name
+//! # Rename both package name and move directory
+//! cargo rename old-crate new-crate --move new-location
 //!
-//! # Dry run to preview changes
-//! cargo rename old-name new-name --dry-run
+//! # Move to a different directory with the new package name
+//! cargo rename old-crate new-crate --move
+//!
+//! # Move to a nested path
+//! cargo rename old-crate --move libs/core/new-crate
+//!
+//! # Preview changes without writing anything
+//! cargo rename old-crate new-crate --dry-run
+//!
+//! # Skip confirmation prompt
+//! cargo rename old-crate new-crate --yes
+//!
+//! # Allow operation with uncommitted git changes
+//! cargo rename old-crate new-crate --allow-dirty
+//! ```
+//!
+//! ## CLI Reference
+//!
+//! ```bash
+//! Usage: cargo rename [OPTIONS] <OLD_NAME> [NEW_NAME]
+//!
+//! Arguments:
+//!   <OLD_NAME>  Current name of the package
+//!   [NEW_NAME]  New name for the package (optional if only moving)
+//!
+//! Options:
+//!       --move [<DIR>]          Move the package to a new directory
+//!       --manifest-path <PATH>  Path to workspace Cargo.toml
+//!   -n, --dry-run               Preview changes without applying them
+//!   -y, --yes                   Skip interactive confirmation
+//!       --allow-dirty           Allow operation with uncommitted git changes
+//!       --color <WHEN>          Control color output [default: auto] [possible values:
+//!                               auto, always, never]
+//!   -q, --quiet...              Decrease logging verbosity
+//!   -v, --verbose...            Increase logging verbosity (-v, -vv, -vvv)
+//!   -h, --help                  Print help (see more with '--help')
+//!   -V, --version               Print version
 //! ```
 //!
 //! ## Library Usage
@@ -58,17 +96,17 @@
 //! # }
 //! ```
 //!
-//! ## Scope and Limitations
-//!
-//! - **Binaries**: `[[bin]]` targets are not renamed to preserve binary compatibility.
-//! - **Macros**: Identifiers generated dynamically inside macros may not be detected.
-//!
 //! ## Safety Checks
 //!
 //! By default, the tool enforces these checks before running:
 //! - `cargo metadata` must resolve successfully.
 //! - The new name must be a valid crate name.
 //! - The git working directory must be clean.
+//!
+//! ## Scope and Limitations
+//!
+//! - **Binaries**: `[[bin]]` targets are not renamed to preserve binary compatibility.
+//! - **Macros**: Identifiers generated dynamically inside macros may not be detected.
 
 pub mod cli;
 pub mod error;
