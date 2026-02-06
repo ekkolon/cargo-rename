@@ -1,9 +1,6 @@
 use crate::error::{RenameError, Result};
-use crate::ops::Transaction;
-use crate::ops::{
-    update_dependent_manifest, update_package_name, update_source_code,
-    update_workspace_dependencies, update_workspace_members,
-};
+use crate::ops::{Transaction, update_workspace_manifest};
+use crate::ops::{update_dependent_manifest, update_package_name, update_source_code};
 use crate::validation::{confirm_operation, preflight_checks};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
@@ -71,13 +68,8 @@ impl RenameArgs {
     }
 
     /// Calculates the new directory path based on the current directory
-    pub fn calculate_new_dir(&self, old_dir: &Path) -> Option<PathBuf> {
-        if let Some(target) = self.move_target() {
-            let parent = old_dir.parent().unwrap_or(old_dir);
-            Some(parent.join(target))
-        } else {
-            None
-        }
+    pub fn calculate_new_dir(&self, _old_dir: &Path, workspace_root: &Path) -> Option<PathBuf> {
+        self.move_target().map(|target| workspace_root.join(target))
     }
 }
 
@@ -98,22 +90,47 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         return Err(RenameError::Cancelled);
     }
 
+    // Get the package we're renaming
     let target_pkg = metadata
         .packages
         .iter()
         .find(|p| p.name == args.old_name)
-        .unwrap();
+        .ok_or_else(|| RenameError::PackageNotFound(args.old_name.clone()))?;
 
     let old_manifest_path = target_pkg.manifest_path.as_std_path();
     let old_dir = old_manifest_path.parent().unwrap();
 
-    // Calculate new directory (if moving)
-    let new_dir = args
-        .calculate_new_dir(old_dir)
-        .unwrap_or_else(|| old_dir.to_path_buf());
+    log::debug!(
+        "Package '{}' is located at: {}",
+        args.old_name,
+        old_dir.display()
+    );
+    log::debug!(
+        "Workspace root: {}",
+        metadata.workspace_root.as_std_path().display()
+    );
 
-    let new_pkg_name = &args.new_name;
-    let should_move = args.should_move();
+    // Calculate new directory
+    let new_dir = if args.should_move() {
+        match &args.r#move {
+            Some(Some(custom_path)) => {
+                // User provided a custom path - it should be relative to workspace root
+                metadata.workspace_root.as_std_path().join(custom_path)
+            }
+            Some(None) => {
+                // --move without argument: move to directory matching package name
+                metadata.workspace_root.as_std_path().join(&args.new_name)
+            }
+            None => old_dir.to_path_buf(),
+        }
+    } else {
+        old_dir.to_path_buf()
+    };
+
+    log::debug!("New directory will be: {}", new_dir.display());
+
+    // Determine if we're actually moving
+    let should_move = args.should_move() && old_dir != new_dir;
 
     // Create transaction
     let mut txn = Transaction::new(args.dry_run);
@@ -126,7 +143,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
             update_dependent_manifest(
                 member.manifest_path.as_std_path(),
                 &args.old_name,
-                new_pkg_name,
+                &args.new_name,
                 &new_dir,
                 should_move, // path_changed
                 true,        // name_changed (always true for rename)
@@ -135,7 +152,7 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         }
 
         // 2. Update target package name
-        update_package_name(old_manifest_path, new_pkg_name, &mut txn)?;
+        update_package_name(old_manifest_path, &args.new_name, &mut txn)?;
 
         // 3. Update source code references
         update_source_code(&metadata, &args.old_name, &args.new_name, &mut txn)?;
@@ -143,20 +160,24 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         // 4. Update workspace manifest
         let root_manifest = metadata.workspace_root.as_std_path().join("Cargo.toml");
         if root_manifest.exists() {
-            // Update workspace.members (if moving)
-            if should_move && old_dir != new_dir {
-                update_workspace_members(&root_manifest, old_dir, &new_dir, &mut txn)?;
-            }
+            let name_changed = args.old_name != args.new_name;
+            let path_changed = old_dir != new_dir;
+            let should_update_members = should_move && old_dir != new_dir;
+            let should_update_deps = old_dir != new_dir || name_changed;
 
-            // Update workspace.dependencies
-            update_workspace_dependencies(
-                &root_manifest,
-                &args.old_name,
-                new_pkg_name,
-                old_dir,
-                &new_dir,
-                &mut txn,
-            )?;
+            if should_update_members || should_update_deps {
+                update_workspace_manifest(
+                    &root_manifest,
+                    &args.old_name,
+                    &args.new_name,
+                    old_dir,
+                    &new_dir,
+                    should_update_members,
+                    path_changed,
+                    name_changed,
+                    &mut txn,
+                )?;
+            }
         }
 
         // 5. Move directory (last step)
@@ -189,6 +210,31 @@ pub fn execute(args: RenameArgs) -> Result<()> {
         }
 
         return Err(e);
+    }
+
+    // Verify the workspace is still valid
+    if should_move {
+        log::info!("Verifying workspace structure...");
+        let verify_result = std::process::Command::new("cargo")
+            .arg("metadata")
+            .arg("--format-version=1")
+            .arg("--no-deps")
+            .current_dir(metadata.workspace_root.as_std_path())
+            .output();
+
+        match verify_result {
+            Ok(output) if output.status.success() => {
+                log::debug!("Workspace verification passed");
+            }
+            Ok(output) => {
+                log::error!("Workspace verification failed:");
+                log::error!("{}", String::from_utf8_lossy(&output.stderr));
+                log::warn!("The rename completed but the workspace may have issues.");
+            }
+            Err(e) => {
+                log::warn!("Could not verify workspace: {}", e);
+            }
+        }
     }
 
     // Print summary (can still access txn)

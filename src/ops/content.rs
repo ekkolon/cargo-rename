@@ -141,11 +141,10 @@ fn walk_package(root: &Path, patterns: &RenamePatterns, txn: &mut Transaction) -
         .git_exclude(true)
         .git_global(true)
         .filter_entry(|e| {
-            if let Some(ft) = e.file_type() {
-                if !ft.is_dir() {
+            if let Some(ft) = e.file_type()
+                && !ft.is_dir() {
                     return true;
                 }
-            }
             !matches!(e.file_name().to_str(), Some("target") | Some(".git"))
         })
         .build();

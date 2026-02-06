@@ -1,5 +1,6 @@
 use crate::error::{RenameError, Result};
 use colored::Colorize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -21,6 +22,8 @@ pub struct Transaction {
     operations: Vec<Operation>,
     dry_run: bool,
     committed: bool,
+    /// Internal map of path redirects due to directory moves
+    path_redirects: HashMap<PathBuf, PathBuf>,
 }
 
 impl Transaction {
@@ -29,36 +32,10 @@ impl Transaction {
             operations: Vec::new(),
             dry_run,
             committed: false,
+            path_redirects: HashMap::new(),
         }
     }
 
-    /// Stage a file update without writing yet
-    pub fn update_file(&mut self, path: PathBuf, new_content: String) -> Result<()> {
-        let original = fs::read_to_string(&path).map_err(|e| {
-            RenameError::Io(std::io::Error::new(
-                e.kind(),
-                format!("Failed to read {}: {}", path.display(), e),
-            ))
-        })?;
-
-        if original == new_content {
-            return Ok(());
-        }
-
-        if self.dry_run {
-            log::info!("Would update: {}", path.display());
-        }
-
-        self.operations.push(Operation::UpdateFile {
-            path,
-            original,
-            new: new_content,
-        });
-
-        Ok(())
-    }
-
-    /// Stage a directory move without moving yet
     pub fn move_directory(&mut self, from: PathBuf, to: PathBuf) -> Result<()> {
         if to.exists() {
             return Err(RenameError::DirectoryExists(to));
@@ -68,7 +45,42 @@ impl Transaction {
             log::info!("Would move: {} → {}", from.display(), to.display());
         }
 
+        // Track this redirect for file operations
+        self.path_redirects.insert(from.clone(), to.clone());
+
         self.operations.push(Operation::MoveDirectory { from, to });
+        Ok(())
+    }
+
+    pub fn update_file(&mut self, path: PathBuf, new_content: String) -> Result<()> {
+        log::debug!("Transaction::update_file called for: {}", path.display());
+
+        let original = fs::read_to_string(&path).map_err(|e| {
+            log::error!("Failed to read file {}: {}", path.display(), e);
+            RenameError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read {}: {}", path.display(), e),
+            ))
+        })?;
+
+        if original == new_content {
+            log::debug!("File content unchanged, skipping: {}", path.display());
+            return Ok(());
+        }
+
+        if self.dry_run {
+            log::info!("Would update: {}", path.display());
+        } else {
+            log::debug!("Staging update for: {}", path.display());
+        }
+
+        self.operations.push(Operation::UpdateFile {
+            path,
+            original,
+            new: new_content,
+        });
+
+        log::debug!("Transaction now has {} operations", self.operations.len());
         Ok(())
     }
 
@@ -126,11 +138,11 @@ impl Transaction {
         let trans_rev = self.operations.iter().rev();
         for op in trans_rev {
             let result = match op {
-                Operation::UpdateFile { path, original, .. } => fs::write(&path, original)
+                Operation::UpdateFile { path, original, .. } => fs::write(path, original)
                     .map_err(|e| format!("Failed to restore {}: {}", path.display(), e)),
                 Operation::MoveDirectory { from, to } => {
                     if to.exists() {
-                        fs::rename(&to, &from)
+                        fs::rename(to, from)
                             .map_err(|e| format!("Failed to move back {}: {}", to.display(), e))
                     } else {
                         Ok(())
@@ -267,28 +279,26 @@ impl Transaction {
         }
 
         // Directory moves
+        // In print_summary, update the directory moves section:
         if !dir_moves.is_empty() {
-            println!("\n{} Directory", "📁".bold());
-            for (from, to) in &dir_moves {
-                let from_name = from.file_name().unwrap().to_string_lossy();
-                let to_name = to.file_name().unwrap().to_string_lossy();
+            println!("📁 Directory");
+            for (from, to) in dir_moves {
+                // Show relative paths from workspace root
+                let from_rel = pathdiff::diff_paths(from, workspace_root)
+                    .unwrap_or_else(|| from.to_path_buf());
+                let to_rel =
+                    pathdiff::diff_paths(to, workspace_root).unwrap_or_else(|| to.to_path_buf());
+
+                let from_display = from_rel.to_string_lossy().replace('\\', "/");
+                let to_display = to_rel.to_string_lossy().replace('\\', "/");
+
                 if self.dry_run {
-                    println!(
-                        "   • {} {} {}",
-                        from_name.yellow(),
-                        "→".dimmed(),
-                        to_name.green()
-                    );
+                    println!("   {} → {}", from_display.yellow(), to_display.green());
                 } else {
-                    println!(
-                        "   {} {} {} {}",
-                        "✓".green(),
-                        from_name,
-                        "→".dimmed(),
-                        to_name.green()
-                    );
+                    println!("   ✓ {} → {}", from_display, to_display.green());
                 }
             }
+            println!();
         }
 
         // Workspace manifests (dependencies)

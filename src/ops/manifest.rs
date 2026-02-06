@@ -4,7 +4,163 @@ use std::fs;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, Value, value};
 
-// src/ops/manifest.rs
+pub fn update_workspace_manifest(
+    root_path: &Path,
+    old_name: &str,
+    new_name: &str,
+    old_dir: &Path,
+    new_dir: &Path,
+    should_update_members: bool,
+    path_changed: bool,
+    name_changed: bool,
+    txn: &mut Transaction,
+) -> Result<()> {
+    let content = fs::read_to_string(root_path)?;
+    let mut doc: DocumentMut = content.parse()?;
+    let mut changed = false;
+
+    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut()) {
+        // Update workspace.members first (if needed)
+        if should_update_members
+            && let Some(members) = workspace.get_mut("members").and_then(|m| m.as_array_mut())
+        {
+            let root_dir = root_path.parent().unwrap();
+
+            let old_rel = pathdiff::diff_paths(old_dir, root_dir)
+                .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
+            let new_rel = pathdiff::diff_paths(new_dir, root_dir)
+                .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
+
+            let old_str = old_rel.to_string_lossy().replace('\\', "/");
+            let new_str = new_rel.to_string_lossy().replace('\\', "/");
+
+            for i in 0..members.len() {
+                if let Some(member_path) = members.get(i).and_then(|v| v.as_str()) {
+                    let normalized_member = member_path.replace('\\', "/");
+
+                    if normalized_member == old_str {
+                        members.replace(i, &new_str);
+                        changed = true;
+                        log::info!("Updated workspace.members: {} → {}", old_str, new_str);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update workspace.dependencies
+        if name_changed || path_changed {
+            if let Some(deps) = workspace
+                .get_mut("dependencies")
+                .and_then(|d| d.as_table_mut())
+            {
+                let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
+
+                for dep_key in dep_keys {
+                    if dep_key != old_name {
+                        continue;
+                    }
+
+                    if let Some(dep_value) = deps.get(&dep_key).cloned() {
+                        let mut new_value = dep_value.clone();
+                        let mut needs_update = false;
+
+                        match &dep_value {
+                            Item::Value(v) if v.is_inline_table() => {
+                                if let Some(inline) = v.as_inline_table() {
+                                    let mut new_inline = inline.clone();
+
+                                    if old_dir != new_dir && inline.contains_key("path") {
+                                        let rel_path = pathdiff::diff_paths(
+                                            new_dir,
+                                            root_path.parent().unwrap(),
+                                        )
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Failed to calculate path")
+                                        })?;
+                                        new_inline.insert(
+                                            "path",
+                                            rel_path.to_string_lossy().as_ref().into(),
+                                        );
+                                        needs_update = true;
+                                    }
+
+                                    if needs_update {
+                                        new_value = value(new_inline);
+                                    }
+                                }
+                            }
+                            Item::Table(table) => {
+                                let mut new_table = table.clone();
+
+                                if old_dir != new_dir && table.contains_key("path") {
+                                    let rel_path =
+                                        pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
+                                            .ok_or_else(|| {
+                                                anyhow::anyhow!("Failed to calculate path")
+                                            })?;
+                                    new_table
+                                        .insert("path", value(rel_path.to_string_lossy().as_ref()));
+                                    needs_update = true;
+                                }
+
+                                if needs_update {
+                                    new_value = Item::Table(new_table);
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        // PRESERVE POSITION: Handle name change and value update separately
+                        if old_name != new_name {
+                            // Need to rename the key while preserving position
+                            // toml_edit doesn't have a direct "rename" method, so we use a workaround
+
+                            // Get all keys in order
+                            let all_keys: Vec<String> =
+                                deps.iter().map(|(k, _)| k.to_string()).collect();
+                            let key_position = all_keys.iter().position(|k| k == old_name).unwrap();
+
+                            // Create a new table with the same entries in the same order
+                            let mut new_deps = toml_edit::Table::new();
+                            for (i, key) in all_keys.iter().enumerate() {
+                                if i == key_position {
+                                    // Insert with new name at the original position
+                                    new_deps.insert(new_name, new_value.clone());
+                                } else {
+                                    // Copy other entries as-is
+                                    if let Some(val) = deps.get(key) {
+                                        new_deps.insert(key, val.clone());
+                                    }
+                                }
+                            }
+
+                            // Replace the entire dependencies table
+                            *deps = new_deps;
+                            changed = true;
+                            log::info!(
+                                "Updated workspace.dependencies: {} → {} (position preserved)",
+                                old_name,
+                                new_name
+                            );
+                        } else if needs_update {
+                            // Only the value changed (path update), not the name
+                            deps.insert(&dep_key, new_value);
+                            changed = true;
+                            log::info!("Updated workspace.dependencies path for: {}", old_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        txn.update_file(root_path.to_path_buf(), doc.to_string())?;
+    }
+
+    Ok(())
+}
 
 /// Updates [workspace.dependencies] entries when renaming a package
 ///
@@ -21,73 +177,69 @@ pub fn update_workspace_dependencies(
     let mut doc: DocumentMut = content.parse()?;
     let mut changed = false;
 
-    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut()) {
-        if let Some(deps) = workspace
+    if let Some(workspace) = doc.get_mut("workspace").and_then(|w| w.as_table_mut())
+        && let Some(deps) = workspace
             .get_mut("dependencies")
             .and_then(|d| d.as_table_mut())
-        {
-            // Collect keys to avoid borrow checker issues
-            let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
+    {
+        // Collect keys to avoid borrow checker issues
+        let dep_keys: Vec<String> = deps.iter().map(|(k, _)| k.to_string()).collect();
 
-            for dep_key in dep_keys {
-                if dep_key != old_name {
-                    continue;
-                }
+        for dep_key in dep_keys {
+            if dep_key != old_name {
+                continue;
+            }
 
-                if let Some(dep_value) = deps.get(&dep_key).cloned() {
-                    let mut new_value = dep_value.clone();
-                    let mut needs_update = false;
+            if let Some(dep_value) = deps.get(&dep_key).cloned() {
+                let mut new_value = dep_value.clone();
+                let mut needs_update = false;
 
-                    match &dep_value {
-                        Item::Value(v) if v.is_inline_table() => {
-                            if let Some(inline) = v.as_inline_table() {
-                                let mut new_inline = inline.clone();
-
-                                // Update path if changed
-                                if old_dir != new_dir && inline.contains_key("path") {
-                                    let rel_path =
-                                        pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
-                                            .ok_or_else(|| {
-                                                anyhow::anyhow!("Failed to calculate path")
-                                            })?;
-                                    new_inline
-                                        .insert("path", rel_path.to_string_lossy().as_ref().into());
-                                    needs_update = true;
-                                }
-
-                                if needs_update {
-                                    new_value = value(new_inline);
-                                }
-                            }
-                        }
-                        Item::Table(table) => {
-                            let mut new_table = table.clone();
+                match &dep_value {
+                    Item::Value(v) if v.is_inline_table() => {
+                        if let Some(inline) = v.as_inline_table() {
+                            let mut new_inline = inline.clone();
 
                             // Update path if changed
-                            if old_dir != new_dir && table.contains_key("path") {
+                            if old_dir != new_dir && inline.contains_key("path") {
                                 let rel_path =
                                     pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
                                         .ok_or_else(|| {
                                             anyhow::anyhow!("Failed to calculate path")
                                         })?;
-                                new_table
-                                    .insert("path", value(rel_path.to_string_lossy().as_ref()));
+                                new_inline
+                                    .insert("path", rel_path.to_string_lossy().as_ref().into());
                                 needs_update = true;
                             }
 
                             if needs_update {
-                                new_value = Item::Table(new_table);
+                                new_value = value(new_inline);
                             }
                         }
-                        _ => {}
                     }
+                    Item::Table(table) => {
+                        let mut new_table = table.clone();
 
-                    // Rename the key if package name changed
-                    if needs_update || old_name != new_name {
-                        deps.remove(&dep_key);
-                        deps.insert(new_name, new_value);
-                        changed = true;
+                        // Update path if changed
+                        if old_dir != new_dir && table.contains_key("path") {
+                            let rel_path =
+                                pathdiff::diff_paths(new_dir, root_path.parent().unwrap())
+                                    .ok_or_else(|| anyhow::anyhow!("Failed to calculate path"))?;
+                            new_table.insert("path", value(rel_path.to_string_lossy().as_ref()));
+                            needs_update = true;
+                        }
+
+                        if needs_update {
+                            new_value = Item::Table(new_table);
+                        }
                     }
+                    _ => {}
+                }
+
+                // Rename the key if package name changed
+                if needs_update || old_name != new_name {
+                    deps.remove(&dep_key);
+                    deps.insert(new_name, new_value);
+                    changed = true;
                 }
             }
         }
@@ -134,16 +286,16 @@ pub fn update_dependent_manifest(
                         Item::Value(v) if v.is_inline_table() => {
                             if let Some(inline) = v.as_inline_table() {
                                 // Check package field
-                                if let Some(pkg) = inline.get("package") {
-                                    if pkg.as_str() == Some(old_name) {
-                                        is_target = true;
-                                        if name_changed {
-                                            // PRESERVE FORMATTING: only update the value, not recreate
-                                            let mut new_inline = inline.clone();
-                                            new_inline.insert("package", new_name.into());
-                                            new_value = value(new_inline);
-                                            needs_update = true;
-                                        }
+                                if let Some(pkg) = inline.get("package")
+                                    && pkg.as_str() == Some(old_name)
+                                {
+                                    is_target = true;
+                                    if name_changed {
+                                        // PRESERVE FORMATTING: only update the value, not recreate
+                                        let mut new_inline = inline.clone();
+                                        new_inline.insert("package", new_name.into());
+                                        new_value = value(new_inline);
+                                        needs_update = true;
                                     }
                                 }
 
@@ -170,15 +322,15 @@ pub fn update_dependent_manifest(
                         }
                         Item::Table(table) => {
                             // Similar logic for tables
-                            if let Some(pkg) = table.get("package") {
-                                if pkg.as_str() == Some(old_name) {
-                                    is_target = true;
-                                    if name_changed {
-                                        let mut new_table = table.clone();
-                                        new_table.insert("package", value(new_name));
-                                        new_value = Item::Table(new_table);
-                                        needs_update = true;
-                                    }
+                            if let Some(pkg) = table.get("package")
+                                && pkg.as_str() == Some(old_name)
+                            {
+                                is_target = true;
+                                if name_changed {
+                                    let mut new_table = table.clone();
+                                    new_table.insert("package", value(new_name));
+                                    new_value = Item::Table(new_table);
+                                    needs_update = true;
                                 }
                             }
 
@@ -218,18 +370,36 @@ pub fn update_dependent_manifest(
                         };
 
                     if needs_update || new_dep_key != dep_key {
-                        // CRITICAL: Remove old, insert new to preserve table order
-                        // Get the position/index before removal
-                        let keys_before: Vec<_> = deps.iter().map(|(k, _)| k.to_string()).collect();
-                        let _position = keys_before.iter().position(|k| k == &dep_key);
+                        if new_dep_key != dep_key {
+                            // Name is changing - preserve position
+                            let all_keys: Vec<String> =
+                                deps.iter().map(|(k, _)| k.to_string()).collect();
+                            let key_position = all_keys.iter().position(|k| k == &dep_key).unwrap();
 
-                        deps.remove(&dep_key);
-                        deps.insert(&new_dep_key, new_value);
+                            let mut new_deps = toml_edit::Table::new();
+                            for (i, key) in all_keys.iter().enumerate() {
+                                if i == key_position {
+                                    new_deps.insert(&new_dep_key, new_value.clone());
+                                } else {
+                                    if let Some(val) = deps.get(key) {
+                                        new_deps.insert(key, val.clone());
+                                    }
+                                }
+                            }
 
-                        // If toml_edit supports it, restore position
-                        // (toml_edit preserves insertion order, so this should work)
-
-                        changed = true;
+                            *deps = new_deps;
+                            changed = true;
+                            log::debug!(
+                                "Renamed dependency {} → {} (position preserved)",
+                                dep_key,
+                                new_dep_key
+                            );
+                        } else {
+                            // Only value changed, not the key
+                            deps.insert(&dep_key, new_value);
+                            changed = true;
+                            log::debug!("Updated dependency value for: {}", dep_key);
+                        }
                     }
                 }
             }
@@ -276,22 +446,70 @@ pub fn update_workspace_members(
         let new_rel = pathdiff::diff_paths(new_dir, root_dir)
             .ok_or_else(|| anyhow::anyhow!("Failed to calc path"))?;
 
-        let old_str = old_rel.to_string_lossy();
-        let new_str = new_rel.to_string_lossy();
+        // Normalize to forward slashes
+        let old_str = old_rel.to_string_lossy().replace('\\', "/");
+        let new_str = new_rel.to_string_lossy().replace('\\', "/");
+
+        log::debug!(
+            "Looking for workspace member: '{}' to update to '{}'",
+            old_str,
+            new_str
+        );
 
         for i in 0..members.len() {
-            if let Some(member_path) = members.get(i).and_then(|v| v.as_str())
-                && member_path == old_str.as_ref()
-            {
-                members.replace(i, new_str.as_ref());
-                changed = true;
-                break;
+            if let Some(member_path) = members.get(i).and_then(|v| v.as_str()) {
+                let normalized_member = member_path.replace('\\', "/");
+
+                if normalized_member == old_str {
+                    log::debug!("Found matching member at index {}", i);
+                    members.replace(i, &new_str);
+                    changed = true;
+                    log::info!("Updated workspace.members: {} → {}", old_str, new_str);
+                    break;
+                }
             }
+        }
+
+        if !changed {
+            log::warn!(
+                "Could not find exact match for '{}' in workspace.members",
+                old_str
+            );
+            log::debug!(
+                "Available members: {:?}",
+                members
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+            );
+
+            // Check if it's covered by a glob pattern
+            for member_path in members.iter().filter_map(|v| v.as_str()) {
+                let normalized = member_path.replace('\\', "/");
+                if normalized.contains('*') {
+                    let prefix = normalized.trim_end_matches('*').trim_end_matches('/');
+                    if old_str.starts_with(prefix) && new_str.starts_with(prefix) {
+                        log::info!("Member is covered by glob pattern: {}", normalized);
+                        log::info!("No workspace.members update needed");
+                        return Ok(()); // Early return - no update needed
+                    }
+                }
+            }
+
+            log::warn!("No glob pattern covers this member either - workspace may be broken!");
         }
     }
 
+    // CRITICAL: Always try to update the file if we made changes
     if changed {
+        log::debug!(
+            "Writing updated workspace.members to {}",
+            root_path.display()
+        );
         txn.update_file(root_path.to_path_buf(), doc.to_string())?;
+        log::debug!("Workspace.members update queued in transaction");
+    } else {
+        log::warn!("No changes made to workspace.members");
     }
 
     Ok(())

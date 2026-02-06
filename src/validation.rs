@@ -223,7 +223,7 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
 
     // Check if this is a git repository
     let is_git_repo = Command::new("git")
-        .args(&["rev-parse", "--git-dir"])
+        .args(["rev-parse", "--git-dir"])
         .current_dir(workspace_root)
         .output()
         .map(|o| o.status.success())
@@ -236,7 +236,7 @@ pub fn check_git_status(workspace_root: &Path) -> Result<()> {
 
     // Check for uncommitted changes
     match Command::new("git")
-        .args(&["status", "--porcelain"])
+        .args(["status", "--porcelain"])
         .current_dir(workspace_root)
         .output()
     {
@@ -310,13 +310,12 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
         .ok_or_else(|| RenameError::PackageNotFound(args.old_name.clone()))?;
 
     // 4. Check git status (unless --allow-dirty)
-    if !args.allow_dirty {
-        if let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
+    if !args.allow_dirty
+        && let Err(e) = check_git_status(metadata.workspace_root.as_std_path()) {
             log::error!("{}", e);
             log::info!("Hint: Use --allow-dirty to bypass this check");
             return Err(e);
         }
-    }
 
     // 5. Additional safety check: ensure new name differs from old name
     if args.old_name == args.new_name && !args.should_move() {
@@ -329,18 +328,19 @@ pub fn preflight_checks(args: &RenameArgs, metadata: &Metadata) -> Result<()> {
     // 6. Check if target directory would conflict (if moving)
     if args.should_move() {
         let old_dir = pkg.manifest_path.parent().unwrap();
-        let new_dir = args.calculate_new_dir(old_dir.as_std_path()).unwrap();
+        let new_dir = args
+            .calculate_new_dir(old_dir.as_std_path(), metadata.workspace_root.as_std_path())
+            .unwrap();
 
         if new_dir.exists() {
             return Err(RenameError::DirectoryExists(new_dir.to_path_buf()));
         }
 
         // Additional check: ensure parent directory exists or can be created
-        if let Some(parent) = new_dir.parent() {
-            if !parent.exists() {
+        if let Some(parent) = new_dir.parent()
+            && !parent.exists() {
                 log::info!("Parent directory '{}' will be created", parent.display());
             }
-        }
     }
 
     Ok(())
@@ -397,7 +397,9 @@ pub fn confirm_operation(args: &RenameArgs, metadata: &Metadata) -> Result<bool>
     // Show move operation details
     if args.should_move() {
         let old_dir = pkg.manifest_path.parent().unwrap();
-        let new_dir = args.calculate_new_dir(old_dir.as_std_path()).unwrap();
+        let new_dir = args
+            .calculate_new_dir(old_dir.as_std_path(), metadata.workspace_root.as_std_path())
+            .unwrap();
         let old_dir_name = old_dir.file_name().unwrap().to_string();
         let new_dir_relative = new_dir
             .strip_prefix(metadata.workspace_root.as_std_path())
