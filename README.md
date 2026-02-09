@@ -4,17 +4,21 @@
 [![Documentation](https://docs.rs/cargo-rename/badge.svg)](https://docs.rs/cargo-rename)
 [![License](https://img.shields.io/crates/l/cargo-rename.svg)](LICENSE)
 
-`cargo-rename` performs a coordinated, all-or-nothing rename of a Cargo package.
+`cargo-rename` performs an atomic rename of a Cargo package, updating all references throughout your workspace in a single operation.
 
-It handles the necessary updates across Cargo.toml, source code, and the file system to ensure the project remains compilable. This includes:
+It updates `[package].name` and all dependency references in manifests across workspace members, and rewrites `use` statements, qualified paths, and crate references in Rust source files. Optionally, it can rename the package directory to match the new name or move it to a different location.
 
-- **Manifests**: Updating `[package].name` and dependency entries in the workspace.
-- **Source Code**: Rewriting `use` statements and qualified paths.
-- **Filesystem**: Optionally moving the package directory to match the new name.
+**Atomicity**
 
-**Safety**
+All modifications are performed atomically. Each file write and directory move is tracked, and if any operation fails, all changes are rolled back to restore the project to its original state.
 
-All changes execute inside a transaction. Every file write and directory move is tracked. If any step fails, the project is automatically restored to its exact previous state.
+**Preconditions**
+
+By default, the following checks must pass before execution:
+
+- `cargo metadata` resolves without errors.
+- The new name is a valid Rust crate identifier.
+- The git working tree is clean (no uncommitted changes).
 
 ## Installation
 
@@ -52,7 +56,7 @@ cargo rename old-crate new-crate --allow-dirty
 
 ## CLI Reference
 
-```bash
+```txt
 Usage: cargo rename [OPTIONS] <OLD_NAME> [NEW_NAME]
 
 Arguments:
@@ -97,15 +101,7 @@ fn main() -> cargo_rename::Result<()> {
 }
 ```
 
-## Safety Checks
-
-By default, the tool enforces these checks before running:
-
-- `cargo metadata` must resolve successfully.
-- The new name must be a valid crate name.
-- The git working directory must be clean.
-
-## Scope and Limitations
+## Limitations
 
 - **Binaries**: `[[bin]]` targets are not renamed to preserve binary compatibility.
 - **Macros**: Identifiers generated dynamically inside macros may not be detected.
